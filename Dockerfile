@@ -42,6 +42,7 @@
 # the plugin-marketplace builder stage removed elsewhere in this change — no
 # SSH/credentials are needed here either.
 FROM node:22-bookworm-slim AS serena-builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 \
     && rm -rf /var/lib/apt/lists/*
@@ -64,6 +65,7 @@ ENV UV_TOOL_BIN_DIR=/opt/serena-tool/bin
 RUN uv tool install git+https://github.com/oraios/serena
 
 FROM node:22-bookworm-slim
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Set early (not just before USER node) so every root-run step below that
 # writes into a user home directory — e.g. `dotnet tool install -g` — lands

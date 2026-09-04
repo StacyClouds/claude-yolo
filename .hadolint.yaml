@@ -1,0 +1,4 @@
+ignored:
+  # Base image is bookworm-slim, tracked for rolling Debian security patches;
+  # pinning apt package versions here would fight that rather than help it.
+  - DL3008
