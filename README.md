@@ -1,5 +1,7 @@
 # claude-yolo
 
+[![Lint](https://github.com/StacyClouds/claude-yolo/actions/workflows/lint.yml/badge.svg)](https://github.com/StacyClouds/claude-yolo/actions/workflows/lint.yml)
+
 A Docker sandbox for running Claude Code with `--dangerously-skip-permissions`
 (YOLO mode) safely, so Claude can act on a project without prompting for
 every file edit or command.
