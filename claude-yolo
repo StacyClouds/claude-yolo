@@ -2,8 +2,12 @@
 # Runs the claude-yolo sandbox against the stacyclouds folder tree.
 #
 # Usage:
-#   claude-yolo [subcommand] [args passed through to claude]
+#   claude-yolo [--workspace <path>] [subcommand] [args passed through to claude]
 #
+#   --workspace <path>   mount <path> as /workspace instead of the script's
+#                        own parent directory. Must come before the
+#                        subcommand (if any). No rebuild required — this is
+#                        a docker run -v argument, resolved fresh each call.
 #   (no subcommand)      same as "yolo"
 #   yolo    [args...]    ensure the image exists (building it only if
 #                        missing), then run claude --dangerously-skip-
@@ -48,19 +52,40 @@ IMAGE=claude-yolo
 VOLUME=claude-yolo-home
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# --workspace must come before the subcommand: args after the subcommand (or
+# after claude-yolo itself in the no-args/yolo default) are forwarded
+# verbatim to `claude` inside the container, so allowing --workspace there
+# too would make it ambiguous which side it was meant for.
+if [ "${1:-}" = "--workspace" ]; then
+    if [ "$#" -lt 2 ]; then
+        echo "claude-yolo: --workspace requires a path argument" >&2
+        exit 1
+    fi
+    if [ ! -d "$2" ]; then
+        echo "claude-yolo: --workspace path '$2' does not exist or is not a directory" >&2
+        exit 1
+    fi
+    PROJECT_DIR="$(cd "$2" && pwd)"
+    shift 2
+fi
+
 # Mounted read-only at run time (not baked into the image) so edits to your
-# global CLAUDE.md take effect on the next run without a rebuild. Skipped
-# entirely if you don't have one.
-CLAUDE_MD_MOUNT=""
-if [ -f "$HOME/.claude/CLAUDE.md" ]; then
-    CLAUDE_MD_MOUNT="--volume=$HOME/.claude/CLAUDE.md:/home/node/.claude/CLAUDE.md:ro"
+# global ~/.claude folder (settings, agents, skills, plugins, commands, etc.)
+# take effect on the next run without a rebuild. Skipped entirely if you
+# don't have one.
+#
+# Mounted at .claude-host, NOT directly at .claude: the container's
+# entrypoint.sh copies just the config items out of it into the writable
+# /home/node/.claude (part of the persisted $VOLUME) on every start, so
+# Claude's login/session state there survives across runs instead of being
+# shadowed by this read-only mount. See entrypoint.sh for details.
+CLAUDE_CONFIG_MOUNT=""
+if [ -d "$HOME/.claude" ]; then
+    CLAUDE_CONFIG_MOUNT="--volume=$HOME/.claude:/home/node/.claude-host:ro"
 fi
 
 build_image() {
-    # --ssh default forwards your host ssh-agent for this build only, so the
-    # build stage can clone the private honeycombio/agent-skill marketplace.
-    # The key itself is never copied into an image layer.
-    docker build --ssh default -t "$IMAGE" "$SCRIPT_DIR"
+    docker build -t "$IMAGE" "$SCRIPT_DIR"
 }
 
 image_exists() {
@@ -79,7 +104,7 @@ run_container() {
     docker run -it --rm \
         -v "$PROJECT_DIR":/workspace \
         -v "$VOLUME":/home/node \
-        ${CLAUDE_MD_MOUNT:+"$CLAUDE_MD_MOUNT"} \
+        ${CLAUDE_CONFIG_MOUNT:+"$CLAUDE_CONFIG_MOUNT"} \
         ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY} \
         "$IMAGE" "$@"
 }
