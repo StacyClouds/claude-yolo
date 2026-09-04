@@ -16,9 +16,13 @@
 #                        [args...] with normal permission prompts
 #   rebuild              force a fresh docker build; does not run a
 #                        container
-#   nuke                 remove the built image and the claude-yolo-home
+#   nuke [--preserve-token]
+#                        remove the built image and the claude-yolo-home
 #                        volume (your persisted Claude login), after
-#                        confirmation
+#                        confirmation. With --preserve-token, the volume
+#                        is emptied instead of removed, keeping only
+#                        ~/.claude/.credentials.json (your OAuth token)
+#                        so the next run skips the login flow.
 #
 # Note: after the first build, "run"/"yolo" reuse the existing image and
 # do NOT rebuild automatically — run "claude-yolo rebuild" explicitly to
@@ -122,12 +126,54 @@ case "$MODE" in
         build_image
         ;;
     nuke)
-        printf 'This removes the %s image and the %s volume (your Claude login). Continue? [y/N] ' "$IMAGE" "$VOLUME"
+        PRESERVE_TOKEN=0
+        if [ "${1:-}" = "--preserve-token" ]; then
+            PRESERVE_TOKEN=1
+            shift
+        fi
+
+        if [ "$PRESERVE_TOKEN" -eq 1 ]; then
+            printf 'This removes the %s image and clears the %s volume, but keeps your Claude login token (~/.claude/.credentials.json). Continue? [y/N] ' "$IMAGE" "$VOLUME"
+        else
+            printf 'This removes the %s image and the %s volume (your Claude login). Continue? [y/N] ' "$IMAGE" "$VOLUME"
+        fi
         read -r reply
         case "$reply" in
             [yY]|[yY][eE][sS])
-                docker rmi "$IMAGE"
-                docker volume rm "$VOLUME"
+                if [ "$PRESERVE_TOKEN" -eq 1 ]; then
+                    # Gut the volume in place instead of removing it, so the
+                    # login token survives. Copy .credentials.json out to the
+                    # helper container's own /tmp (NOT under /home/node, so
+                    # it isn't wiped by the same command), delete everything
+                    # else in the volume, then copy the token back in.
+                    #
+                    # Needs a container with sh/find/cp/chmod to do the
+                    # gutting; reuse $IMAGE while it still exists (about to
+                    # be rmi'd below) rather than pulling something extra.
+                    # Falls back to busybox if $IMAGE was never built (e.g.
+                    # nuke called before any run) but the volume somehow
+                    # exists.
+                    if docker volume inspect "$VOLUME" >/dev/null 2>&1; then
+                        HELPER_IMAGE="$IMAGE"
+                        image_exists || HELPER_IMAGE=busybox
+                        docker run --rm -v "$VOLUME":/home/node "$HELPER_IMAGE" sh -c '
+                            set -e
+                            SRC=/home/node/.claude/.credentials.json
+                            TMP=/tmp/preserved-credentials.json
+                            [ -f "$SRC" ] && cp "$SRC" "$TMP"
+                            find /home/node -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+                            if [ -f "$TMP" ]; then
+                                mkdir -p /home/node/.claude
+                                cp "$TMP" "$SRC"
+                                chmod 600 "$SRC"
+                            fi
+                        '
+                    fi
+                    docker rmi "$IMAGE"
+                else
+                    docker rmi "$IMAGE"
+                    docker volume rm "$VOLUME"
+                fi
                 ;;
             *)
                 echo "Aborted." >&2
