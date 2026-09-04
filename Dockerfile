@@ -2,14 +2,16 @@
 #
 # Isolation model:
 #   - Only /workspace (the mounted project folders) is writable project data.
-#   - No `git` binary in the final image, and no host git config/credentials/SSH
-#     keys are copied in — the mounted repos' .git folders are inert data that
-#     nothing in the container can drive. Claude can read/edit files but cannot
-#     commit, push, rewrite history, or touch remotes. A separate, throwaway
-#     build stage (serena-builder) has a real git purely to pre-install the
-#     serena plugin's MCP server at build time, since it's normally fetched
-#     via a `git+` URL; only that stage's output is copied into the final
-#     image, which still has zero working git of any kind.
+#   - A real `git` binary is installed, but `/usr/local/bin/git` shadows it on
+#     PATH with a wrapper that blocks `push` (and its plumbing equivalent
+#     `send-pack`) to any remote, however invoked, while delegating every
+#     other subcommand to the real binary at /usr/bin/git. Claude can branch,
+#     stage, commit, and read history freely against a repository anywhere
+#     under /workspace (including a workspace holding several repos, nested
+#     or as siblings), but cannot send refs to a remote. No host git config,
+#     credentials, or SSH keys are copied in regardless, so even an unblocked
+#     push would have nothing to authenticate with against a private remote.
+#     See openspec/changes/add-restricted-git for the full rationale.
 #   - Plugin/settings/agent/skill configuration is NOT baked into the image.
 #     It comes from a read-only, run-time mount of the host's `~/.claude`
 #     folder (see the claude-yolo script) - the sandbox uses the same plugins
@@ -32,10 +34,8 @@
 
 # serena's plugin-provided MCP config (from the official marketplace) launches
 # it via `uvx --from git+https://github.com/oraios/serena serena
-# start-mcp-server`. `uv` resolves a "git+" dependency spec by shelling out to
-# a real `git` binary — which the final image below deliberately never has.
-# Left as-is, that means serena's MCP server can never even download, let
-# alone start: uv's own git operation (`git init`) hits the stub and fails.
+# start-mcp-server`. Left as-is, that would re-clone and re-resolve the
+# package from GitHub on every single container start, rather than once.
 # This throwaway stage has a real `git` purely to pre-install serena once at
 # build time; only its *output* (a self-contained tool install, no git
 # involved) is copied into the final stage. It's a public repo, so — unlike
@@ -70,15 +70,29 @@ FROM node:22-bookworm-slim
 # under /home/node instead of /root.
 ENV HOME=/home/node
 
-# Deliberately no `git`, `gh`, or any git-capable tool here.
+# A real `git` is installed below, but /usr/local/bin/git (earlier than
+# /usr/bin/git on the default Debian PATH, same trick the old stub relied on)
+# is git-wrapper.sh: a wrapper that blocks only `push` and its plumbing
+# equivalent `send-pack` - to any remote, however invoked, not just one named
+# `origin` - and delegates every other subcommand to the real binary at
+# /usr/bin/git. See git-wrapper.sh itself for how it resolves the actual
+# subcommand, and openspec/changes/add-restricted-git for the full rationale.
+# safe.directory is set to `*` (not just /workspace) and a fallback identity
+# is configured globally so this works with no manual setup against any
+# repository anywhere under /workspace, including a workspace holding several
+# repos, nested or as siblings - ownership-mismatch protection isn't a
+# meaningful boundary in this single-user, single-purpose container.
 # python3 is here for the `uv`/`uvx` install below, not for git-adjacent
 # reasons - uv can also fetch its own Python, but a system python3 avoids
 # relying on that network fetch every time a fresh container starts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl bash tini python3 jq \
+        ca-certificates curl bash tini python3 jq git \
     && rm -rf /var/lib/apt/lists/* \
-    && printf '#!/bin/sh\necho "git is disabled in this sandbox (claude-yolo container)" >&2\nexit 1\n' > /usr/local/bin/git \
-    && chmod +x /usr/local/bin/git
+    && git config --system --add safe.directory '*' \
+    && git config --system user.name 'Claude Sandbox' \
+    && git config --system user.email 'sandbox@localhost'
+COPY --chown=root:root git-wrapper.sh /usr/local/bin/git
+RUN chmod +x /usr/local/bin/git
 
 ARG CLAUDE_VERSION=2.1.258
 ARG OPENSPEC_VERSION=1.11.0
@@ -112,17 +126,16 @@ RUN mkdir -p /opt/skills/frontend-design \
 
 # uv/uvx: general-purpose Python tool runner, kept available at runtime for
 # any plugin or ad-hoc script that wants it (e.g. `uvx <tool>`). Not what
-# actually runs serena any more — see the serena-tool copy below — since uv
-# would need a real `git` for that plugin's own `git+` invocation, which this
-# final image deliberately never has.
+# actually runs serena any more — see the serena-tool copy below — which
+# avoids re-cloning and re-resolving serena's package from GitHub on every
+# single container start.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="${PATH}:/home/node/.local/bin"
 
-# Baked by the serena-builder stage above, where a real `git` exists only for
-# that one build step and never reaches this final image. entrypoint.sh
+# Baked by the serena-builder stage above at a pinned version. entrypoint.sh
 # rewrites the serena plugin's own .mcp.json to invoke this directly, instead
 # of its default `uvx --from git+...` command, so starting serena's MCP
-# server never needs git at runtime.
+# server doesn't re-fetch the package from GitHub on every container start.
 COPY --from=serena-builder /opt/serena-tool /opt/serena-tool
 RUN chown -R node:node /opt/serena-tool
 ENV PATH="${PATH}:/opt/serena-tool/bin"

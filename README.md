@@ -8,20 +8,24 @@ every file edit or command.
 
 YOLO mode skips Claude Code's normal per-action permission prompts. That's
 fine for throwaway edits inside a project folder, but risky if Claude can
-also touch your host machine, your git history, or your credentials. This
-sandbox removes those risks structurally rather than by relying on Claude's
-own restraint:
+also touch your host machine, push to your remotes, or use your credentials.
+This sandbox removes those risks structurally rather than by relying on
+Claude's own restraint:
 
 - Only the mounted project folder (`/workspace`) is writable project data.
-- There is **no `git` binary** in the image — it's replaced with a stub that
-  just prints an error and exits. Mounted repos' `.git` folders are inert
-  data Claude can read but never commit to, push from, or rewrite.
-- No host git config, credentials, or SSH keys are copied in.
+- Git works locally, but **`push` is disabled**. A wrapper shadows the real
+  `git` binary and blocks `push` (and its plumbing equivalent `send-pack`) to
+  any remote, however invoked — Claude can branch, stage, commit, and read
+  history against any repo under `/workspace`, but can't send refs anywhere.
+- No host git config, credentials, or SSH keys are copied in, so even an
+  unblocked push would have nothing to authenticate with against a private
+  remote.
 - Nothing outside the container is reachable.
 
 Because of this, it's safe to let Claude run unattended with permissions
-skipped — the worst it can do is make a mess of the mounted folder, which is
-recoverable from git on the host side (where git actually works).
+skipped — the worst it can do is make a mess of (or bad commits in) the
+mounted folder, and since nothing was ever pushed, that's always recoverable
+by resetting to a point before the session, from the host side if needed.
 
 ## Requirements
 
@@ -164,15 +168,12 @@ Baked into the image, on top of a pinned version of Claude Code itself:
 - **`serena`, pre-installed at build time** — the `serena` plugin (if your
   host's `~/.claude` has it configured) normally launches its MCP server via
   `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`,
-  but `uv` resolves that `git+` spec by shelling out to a real `git` binary —
-  which this sandbox deliberately never has (see
-  [What this sandbox does not protect against](#what-this-sandbox-does-not-protect-against)).
-  A throwaway build stage with a real `git` (a public repo, so no
-  SSH/credentials needed) installs serena once at image build time into
-  `/opt/serena-tool`; `entrypoint.sh` rewrites serena's plugin config on
-  every start to call that pre-installed binary directly instead of its
-  default `git+` invocation, so its MCP server can actually start without
-  ever needing git at runtime. One consequence: serena's version is pinned
+  which would otherwise re-fetch and resolve the package from GitHub on every
+  single container start. A throwaway build stage with a real `git` (a public
+  repo, so no SSH/credentials needed) installs serena once at image build time
+  into `/opt/serena-tool` instead; `entrypoint.sh` rewrites serena's plugin
+  config on every start to call that pre-installed binary directly rather than
+  its default `git+` invocation. One consequence: serena's version is pinned
   to whatever was fetched at the last `claude-yolo rebuild`, rather than
   always tracking the latest commit.
 - **.NET SDKs 8, 9, 10, and the latest 11 preview**, plus `dotnet-stryker`
@@ -183,10 +184,16 @@ Baked into the image, on top of a pinned version of Claude Code itself:
 
 ## What this sandbox does *not* protect against
 
-- **Arbitrary damage inside `/workspace`.** Claude can edit or delete any
-  file in the mounted project. The mitigation is git, on the host — commit
-  your work before a YOLO session so it's always recoverable, since git
-  itself doesn't work *inside* the container.
+- **Arbitrary damage inside `/workspace`.** Claude can edit, delete, or commit
+  over any file in the mounted project — commits made inside the container are
+  real and local. The mitigation is still git, ultimately on the host: since
+  push is disabled inside the sandbox, recovering from an unwanted change means
+  resetting to a commit from before the session (or from the host's own
+  clone/copy) rather than reverting a push.
+- **Someone locating and calling the real git binary directly.** The push
+  block is a wrapper around `git` on `PATH`, not a kernel- or network-level
+  restriction — it stops normal use from pushing, not a deliberate attempt to
+  bypass it from inside the container.
 - **A host with no `~/.claude`.** You get zero plugins configured (no
   `serena`, `context7`, etc.) beyond the `opsx`/`frontend-design` fallback —
   there's nothing to source them from.
