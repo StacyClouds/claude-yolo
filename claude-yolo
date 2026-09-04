@@ -1,0 +1,120 @@
+#!/bin/sh
+# Runs the claude-yolo sandbox against the stacyclouds folder tree.
+#
+# Usage:
+#   claude-yolo [subcommand] [args passed through to claude]
+#
+#   (no subcommand)      same as "yolo"
+#   yolo    [args...]    ensure the image exists (building it only if
+#                        missing), then run claude --dangerously-skip-
+#                        permissions [args...] (YOLO mode)
+#   run     [args...]    same image-ensure behavior, then run claude
+#                        [args...] with normal permission prompts
+#   rebuild              force a fresh docker build; does not run a
+#                        container
+#   nuke                 remove the built image and the claude-yolo-home
+#                        volume (your persisted Claude login), after
+#                        confirmation
+#
+# Note: after the first build, "run"/"yolo" reuse the existing image and
+# do NOT rebuild automatically — run "claude-yolo rebuild" explicitly to
+# pick up Dockerfile changes or newer floating package versions (e.g.
+# .NET SDK patches).
+#
+# Safe to YOLO because the container has no git binary and can't reach
+# anything outside the mounted project folder.
+#
+# Callable from anywhere: symlinked as ~/.local/bin/claude-yolo, which is on
+# PATH. Resolves the symlink itself so the Dockerfile/context can be found
+# regardless of where it's invoked from.
+set -eu
+
+resolve_path() {
+    target="$1"
+    while [ -L "$target" ]; do
+        dir="$(cd "$(dirname "$target")" && pwd)"
+        target="$(readlink "$target")"
+        case "$target" in
+            /*) ;;
+            *) target="$dir/$target" ;;
+        esac
+    done
+    printf '%s\n' "$target"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "$(resolve_path "$0")")" && pwd)"
+
+IMAGE=claude-yolo
+VOLUME=claude-yolo-home
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Mounted read-only at run time (not baked into the image) so edits to your
+# global CLAUDE.md take effect on the next run without a rebuild. Skipped
+# entirely if you don't have one.
+CLAUDE_MD_MOUNT=""
+if [ -f "$HOME/.claude/CLAUDE.md" ]; then
+    CLAUDE_MD_MOUNT="--volume=$HOME/.claude/CLAUDE.md:/home/node/.claude/CLAUDE.md:ro"
+fi
+
+build_image() {
+    # --ssh default forwards your host ssh-agent for this build only, so the
+    # build stage can clone the private honeycombio/agent-skill marketplace.
+    # The key itself is never copied into an image layer.
+    docker build --ssh default -t "$IMAGE" "$SCRIPT_DIR"
+}
+
+image_exists() {
+    docker image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+ensure_image() {
+    if ! image_exists; then
+        build_image
+    fi
+}
+
+run_container() {
+    # claude-yolo-home persists Claude's login/auth across container runs,
+    # separate from the project bind mount so it never lands inside a repo.
+    docker run -it --rm \
+        -v "$PROJECT_DIR":/workspace \
+        -v "$VOLUME":/home/node \
+        ${CLAUDE_MD_MOUNT:+"$CLAUDE_MD_MOUNT"} \
+        ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY} \
+        "$IMAGE" "$@"
+}
+
+MODE=yolo
+case "${1:-}" in
+    rebuild|nuke|run|yolo)
+        MODE="$1"
+        shift
+        ;;
+esac
+
+case "$MODE" in
+    rebuild)
+        build_image
+        ;;
+    nuke)
+        printf 'This removes the %s image and the %s volume (your Claude login). Continue? [y/N] ' "$IMAGE" "$VOLUME"
+        read -r reply
+        case "$reply" in
+            [yY]|[yY][eE][sS])
+                docker rmi "$IMAGE"
+                docker volume rm "$VOLUME"
+                ;;
+            *)
+                echo "Aborted." >&2
+                ;;
+        esac
+        ;;
+    run)
+        ensure_image
+        run_container claude "$@"
+        ;;
+    yolo)
+        ensure_image
+        run_container claude --dangerously-skip-permissions "$@"
+        ;;
+esac
