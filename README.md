@@ -38,6 +38,8 @@ by resetting to a point before the session, from the host side if needed.
 
 ## Installation
 
+### macOS / Linux / WSL / Git Bash
+
 Symlink the `claude-yolo` script onto your `PATH`, e.g.:
 
 ```sh
@@ -46,6 +48,35 @@ ln -s /path/to/this/repo/claude-yolo ~/.local/bin/claude-yolo
 
 The script resolves its own symlink, so it finds the Dockerfile regardless
 of where it's called from.
+
+### Windows (PowerShell)
+
+If you don't use WSL or Git Bash, `claude-yolo.ps1` is a native PowerShell
+port of the same script, for Docker Desktop on Windows. Requirements:
+
+- Docker Desktop, running Linux containers (the default)
+- Windows PowerShell 5.1 (built into Windows 10/11) or PowerShell 7+ — both
+  are supported
+
+`claude-yolo.ps1` doesn't follow symlinks (see `openspec/changes/archive/`
+for why), so instead of symlinking it onto `PATH`, either:
+
+- Add this repo's folder to your `PATH` and call it as `claude-yolo.ps1
+  [args...]`, or
+- Add a function to your PowerShell profile (`$PROFILE`) that calls it by
+  full path:
+  ```powershell
+  function claude-yolo { & "C:\path\to\this\repo\claude-yolo.ps1" @args }
+  ```
+
+The first time you run it, Windows may block the downloaded/cloned script
+as unsigned. Unblock it once with the built-in `Unblock-File` cmdlet —
+`Unblock-File .\claude-yolo.ps1` — or invoke it directly with
+`powershell -ExecutionPolicy Bypass -File .\claude-yolo.ps1 ...`, same as
+you'd set the executable bit on `claude-yolo` elsewhere.
+
+Everywhere below, replace `claude-yolo` with `claude-yolo.ps1` — every
+subcommand, flag, and pass-through argument works identically.
 
 ## Usage
 
