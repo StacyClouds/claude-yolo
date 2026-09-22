@@ -182,7 +182,7 @@ ENV PATH="${PATH}:/usr/share/dotnet"
 # never completes. Pinning this command to the 10.0 GA SDK via a scratch
 # global.json sidesteps the preview build entirely; the installed tool
 # itself still runs fine later under whichever SDK a mounted project uses.
-WORKDIR /tmp
+WORKDIR /tmp/stryker-install
 RUN printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
     && dotnet tool install -g dotnet-stryker \
     && rm -f global.json
