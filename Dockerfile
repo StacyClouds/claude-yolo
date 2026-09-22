@@ -187,7 +187,7 @@ RUN printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > glob
     && dotnet tool install -g dotnet-stryker \
     && rm -f global.json
 WORKDIR /
-RUN rmdir /tmp/stryker-install
+RUN rm -rf /tmp/stryker-install
 ENV PATH="${PATH}:/home/node/.dotnet/tools"
 
 # Bake OpenSpec's Claude Code integration — the `opsx:*` commands
