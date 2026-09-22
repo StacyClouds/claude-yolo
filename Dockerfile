@@ -183,9 +183,7 @@ ENV PATH="${PATH}:/usr/share/dotnet"
 # global.json sidesteps the preview build entirely; the installed tool
 # itself still runs fine later under whichever SDK a mounted project uses.
 WORKDIR /tmp/stryker-install
-RUN mkdir -p /tmp/stryker-install \
-    && chown root:root /tmp/stryker-install \
-    && printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
+RUN printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
     && dotnet tool install -g dotnet-stryker \
     && rm -f global.json
 WORKDIR /
