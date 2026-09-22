@@ -182,10 +182,11 @@ ENV PATH="${PATH}:/usr/share/dotnet"
 # never completes. Pinning this command to the 10.0 GA SDK via a scratch
 # global.json sidesteps the preview build entirely; the installed tool
 # itself still runs fine later under whichever SDK a mounted project uses.
-RUN mkdir -p /tmp/stryker-install && cd /tmp/stryker-install \
-    && printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
-    && dotnet tool install -g dotnet-stryker \
-    && cd / && rm -rf /tmp/stryker-install
+WORKDIR /tmp/stryker-install
+RUN printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
+    && dotnet tool install -g dotnet-stryker
+WORKDIR /
+RUN rm -rf /tmp/stryker-install
 ENV PATH="${PATH}:/home/node/.dotnet/tools"
 
 # Bake OpenSpec's Claude Code integration — the `opsx:*` commands
