@@ -88,11 +88,13 @@ ENV HOME=/home/node
 # reasons - uv can also fetch its own Python, but a system python3 avoids
 # relying on that network fetch every time a fresh container starts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl bash tini python3 jq git \
+        ca-certificates curl bash tini python3 jq git sudo \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system --add safe.directory '*' \
     && git config --system user.name 'Claude Sandbox' \
-    && git config --system user.email 'sandbox@localhost'
+    && git config --system user.email 'sandbox@localhost' \
+    && echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node \
+    && chmod 0440 /etc/sudoers.d/node
 COPY --chown=root:root git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git
 
@@ -172,7 +174,18 @@ ENV PATH="${PATH}:/usr/share/dotnet"
 # dotnet-stryker (mutation testing), installed as a global dotnet tool.
 # Deliberately unpinned — always whatever's newest on NuGet at build time,
 # same floating approach already used for the .NET 11 preview channel.
-RUN dotnet tool install -g dotnet-stryker
+#
+# `dotnet` picks the highest installed SDK to run its own CLI commands
+# unless a global.json says otherwise, which here means the 11.0 preview.
+# That preview build (confirmed: 11.0.100-rc.1.26425.128) hangs indefinitely
+# partway through `tool install` — package signature verification/extraction
+# never completes. Pinning this command to the 10.0 GA SDK via a scratch
+# global.json sidesteps the preview build entirely; the installed tool
+# itself still runs fine later under whichever SDK a mounted project uses.
+RUN mkdir -p /tmp/stryker-install && cd /tmp/stryker-install \
+    && printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
+    && dotnet tool install -g dotnet-stryker \
+    && cd / && rm -rf /tmp/stryker-install
 ENV PATH="${PATH}:/home/node/.dotnet/tools"
 
 # Bake OpenSpec's Claude Code integration — the `opsx:*` commands
