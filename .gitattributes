@@ -1,0 +1,6 @@
+# Copied into the Linux image or run by sh; CRLF breaks the shebang and
+# shell parsing regardless of the host's core.autocrlf setting.
+*.sh text eol=lf
+claude-yolo text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
