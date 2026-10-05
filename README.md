@@ -203,6 +203,65 @@ Baked into the image, on top of a pinned version of Claude Code itself:
   covers npm's own global install location; it doesn't address
   host-UID-vs-container-UID mismatches for files under `/workspace` itself.
 
+## opencode-yolo (local model server)
+
+`opencode-yolo` is a sibling script built from this same `Dockerfile` that
+launches [`opencode`](https://opencode.ai) instead of Claude Code, wired up
+to a local OpenAI-compatible model server (for example, an MLX server)
+instead of a hosted provider. It shares the sandbox's isolation model
+(`/workspace`-only writes, blocked `git push`, no host credentials) but
+builds its own `opencode-yolo` image tag and uses its own
+`opencode-yolo-home` volume — rebuilding or nuking one script never touches
+the other's image or volume.
+
+### Requirements
+
+- Docker
+- An OpenAI-compatible model server already running and reachable from the
+  host at `http://localhost:8000` (e.g. `mlx_lm.server`). No login or API
+  key is needed — the sandbox assumes an unauthenticated local server.
+
+### Installation
+
+```sh
+ln -s /path/to/this/repo/opencode-yolo ~/.local/bin/opencode-yolo
+```
+
+### Usage
+
+```
+opencode-yolo [--workspace <path>] [subcommand] [args...]
+```
+
+| Subcommand | Behaviour |
+|---|---|
+| *(none)* | Same as `yolo`. |
+| `yolo [args...]` | Build the image if it doesn't exist yet, then run `opencode --auto [args...]` inside it — opencode's auto-approve mode. |
+| `run [args...]` | Same, but launches plain `opencode [args...]` — normal interactive approval prompts apply. |
+| `rebuild` | Force a fresh `docker build` of the `opencode-yolo` tag. Doesn't start a container, and doesn't affect `claude-yolo`'s image. |
+| `nuke` | Removes the `opencode-yolo` image **and** the `opencode-yolo-home` volume, after confirmation. Doesn't touch `claude-yolo`'s image or volume. |
+
+`--workspace` works the same way as in `claude-yolo` (see above).
+
+### Picking a model: automatic, from whatever the server has loaded
+
+On every container start, `opencode-entrypoint.sh` queries the model
+server's `GET /v1/models` endpoint and configures `opencode` to use whatever
+model it reports as the default — there's nothing to type or configure by
+hand. If the server isn't running yet, the sandbox still starts; a warning
+is printed, and opencode starts with no default model configured until you
+start the server and launch a fresh container.
+
+By default the server is expected at `http://localhost:8000` on the host
+(reached from inside the container via `host.docker.internal`, which
+`opencode-yolo` maps explicitly so this also works on plain Linux Docker
+Engine, not just Docker Desktop). Point it at a different address with
+`MLX_BASE_URL`:
+
+```sh
+MLX_BASE_URL=http://localhost:9000 opencode-yolo
+```
+
 ## Related
 
 See `openspec/` in this repo for the change history behind this sandbox's

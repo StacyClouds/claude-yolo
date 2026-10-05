@@ -98,21 +98,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --chown=root:root git-wrapper.sh /usr/local/bin/git
 RUN chmod +x /usr/local/bin/git
 
-ARG CLAUDE_VERSION=2.1.258
 ARG OPENSPEC_VERSION=1.11.0
+# opencode-ai is the npm package for the `opencode` CLI (opencode.ai), used by
+# the opencode-yolo script/entrypoint - see openspec/changes/add-opencode-yolo.
+ARG OPENCODE_VERSION=1.18.34
+# claude-code is deliberately unpinned (@latest, not an ARG-pinned version
+# like openspec/opencode above) so every image build picks up whatever
+# Anthropic has published most recently - see
+# openspec/changes/float-claude-code-version.
 # chown the npm global prefix to "node" (it's root-owned by default) so the
 # unprivileged "node" user this container runs as can `npm install -g`
 # itself at runtime, not just during this root-run build step.
 RUN npm install -g \
-        @anthropic-ai/claude-code@${CLAUDE_VERSION} \
+        @anthropic-ai/claude-code@latest \
         @fission-ai/openspec@${OPENSPEC_VERSION} \
+        opencode-ai@${OPENCODE_VERSION} \
     && chown -R node:node "$(npm config get prefix)"
 
-# The image pins an exact claude-code version above; Claude Code's own
-# background auto-updater would otherwise silently upgrade it on every
-# start (and re-check periodically while running), drifting from that pin.
-# This only disables the background check/install — `claude update` still
-# works if you deliberately want to move off CLAUDE_VERSION.
+# claude-code floats to whatever's newest at build time (above); Claude
+# Code's own background auto-updater would otherwise silently upgrade it
+# again on every start (and re-check periodically while running), drifting
+# the running container away from that build-time version. This only
+# disables the background check/install — `claude update` still works if
+# you deliberately want to move off the version this image was built with.
 ENV DISABLE_AUTOUPDATER=1
 
 # Anthropic's official "frontend-design" skill (github.com/anthropics/skills),
@@ -133,7 +141,15 @@ RUN mkdir -p /opt/skills/frontend-design \
 # actually runs serena any more — see the serena-tool copy below — which
 # avoids re-cloning and re-resolving serena's package from GitHub on every
 # single container start.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# chown: this installer runs as root (USER node isn't set until later in
+# this file) with HOME=/home/node, so it creates /home/node/.local root-owned
+# in this image layer. A brand-new named volume mounted at /home/node is
+# seeded from that layer, preserving that ownership - harmless for Claude
+# Code (which only ever writes under ~/.claude), but opencode writes its own
+# state under ~/.local/share/opencode and fails with EACCES as the
+# unprivileged node user without this.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && chown -R node:node /home/node/.local
 ENV PATH="${PATH}:/home/node/.local/bin"
 
 # Baked by the serena-builder stage above at a pinned version. entrypoint.sh
@@ -205,6 +221,12 @@ RUN openspec init --tools claude --force --no-animation /opt/openspec-baked \
 
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Used only by the opencode-yolo script (via `docker run --entrypoint`), never
+# by claude-yolo - see openspec/changes/add-opencode-yolo. Baked in here
+# regardless, same as entrypoint.sh above, so one image serves both scripts.
+COPY --chown=root:root opencode-entrypoint.sh /usr/local/bin/opencode-entrypoint.sh
+RUN chmod +x /usr/local/bin/opencode-entrypoint.sh
 
 USER node
 WORKDIR /workspace

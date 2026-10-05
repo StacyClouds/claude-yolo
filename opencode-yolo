@@ -1,0 +1,152 @@
+#!/bin/sh
+# Runs the opencode-yolo sandbox - a sibling to claude-yolo that launches
+# `opencode` (opencode.ai) instead of `claude`, pointed at a local
+# OpenAI-compatible model server instead of a hosted provider. See
+# openspec/changes/add-opencode-yolo for the full rationale.
+#
+# Usage:
+#   opencode-yolo [--workspace <path>] [subcommand] [args passed through to opencode]
+#
+#   --workspace <path>   mount <path> as /workspace instead of the script's
+#                        own parent directory. Must come before the
+#                        subcommand (if any). No rebuild required - this is
+#                        a docker run -v argument, resolved fresh each call.
+#   (no subcommand)      same as "yolo"
+#   yolo    [args...]    ensure the opencode-yolo image exists (building it
+#                        only if missing), then run opencode --auto [args...]
+#                        (opencode's auto-approve mode)
+#   run     [args...]    same image-ensure behavior, then run opencode
+#                        [args...] with normal interactive approval prompts
+#   rebuild              force a fresh docker build of the opencode-yolo
+#                        tag; does not run a container. Never touches the
+#                        separate claude-yolo image tag.
+#   nuke                 remove the opencode-yolo image and the
+#                        opencode-yolo-home volume, after confirmation.
+#                        Never touches claude-yolo's image or volume.
+#
+# opencode-yolo builds its own "opencode-yolo" image tag and uses its own
+# "opencode-yolo-home" volume, kept separate from claude-yolo's "claude-yolo"
+# tag and "claude-yolo-home" volume, even though both are built from this
+# same repo's Dockerfile - rebuilding or nuking one never affects the other.
+#
+# The model server is assumed to be an OpenAI-compatible server (e.g. an MLX
+# server) listening on the host at http://localhost:8000. Set MLX_BASE_URL
+# before invoking this script to point at a different address; it's passed
+# through to opencode-entrypoint.sh, which probes it for the currently
+# loaded model and configures opencode to use it as the default - no model
+# name needs to be typed by hand. If the server isn't reachable yet, the
+# sandbox still starts; opencode-entrypoint.sh prints a warning.
+#
+# Note: after the first build, "run"/"yolo" reuse the existing image and
+# do NOT rebuild automatically - run "opencode-yolo rebuild" explicitly to
+# pick up Dockerfile changes or a newer OPENCODE_VERSION pin.
+#
+# Callable from anywhere: symlinked as ~/.local/bin/opencode-yolo, which is
+# on PATH. Resolves the symlink itself so the Dockerfile/context can be
+# found regardless of where it's invoked from.
+set -eu
+
+resolve_path() {
+    target="$1"
+    while [ -L "$target" ]; do
+        dir="$(cd "$(dirname "$target")" && pwd)"
+        target="$(readlink "$target")"
+        case "$target" in
+            /*) ;;
+            *) target="$dir/$target" ;;
+        esac
+    done
+    printf '%s\n' "$target"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "$(resolve_path "$0")")" && pwd)"
+
+IMAGE=opencode-yolo
+VOLUME=opencode-yolo-home
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# --workspace must come before the subcommand: args after the subcommand (or
+# after opencode-yolo itself in the no-args/yolo default) are forwarded
+# verbatim to `opencode` inside the container, so allowing --workspace there
+# too would make it ambiguous which side it was meant for.
+if [ "${1:-}" = "--workspace" ]; then
+    if [ "$#" -lt 2 ]; then
+        echo "opencode-yolo: --workspace requires a path argument" >&2
+        exit 1
+    fi
+    if [ ! -d "$2" ]; then
+        echo "opencode-yolo: --workspace path '$2' does not exist or is not a directory" >&2
+        exit 1
+    fi
+    PROJECT_DIR="$(cd "$2" && pwd)"
+    shift 2
+fi
+
+build_image() {
+    docker build -t "$IMAGE" "$SCRIPT_DIR"
+}
+
+image_exists() {
+    docker image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+ensure_image() {
+    if ! image_exists; then
+        build_image
+    fi
+}
+
+run_container() {
+    # opencode-yolo-home persists opencode's config/session state across
+    # container runs, separate from the project bind mount so it never
+    # lands inside a repo - mirrors claude-yolo-home.
+    #
+    # --entrypoint: opencode-entrypoint.sh (not entrypoint.sh, which is
+    # Claude-specific) wires the local model provider before exec-ing the
+    # requested command. --add-host: makes host.docker.internal resolve on
+    # plain Linux Docker Engine the same way it already does on Docker
+    # Desktop, so the model server (bound to the host's loopback interface)
+    # is reachable either way.
+    docker run -it --rm \
+        --entrypoint /usr/local/bin/opencode-entrypoint.sh \
+        --add-host=host.docker.internal:host-gateway \
+        -v "$PROJECT_DIR":/workspace \
+        -v "$VOLUME":/home/node \
+        ${MLX_BASE_URL:+-e MLX_BASE_URL} \
+        "$IMAGE" "$@"
+}
+
+MODE=yolo
+case "${1:-}" in
+    rebuild|nuke|run|yolo)
+        MODE="$1"
+        shift
+        ;;
+esac
+
+case "$MODE" in
+    rebuild)
+        build_image
+        ;;
+    nuke)
+        printf 'This removes the %s image and the %s volume (opencode'"'"'s local config/session state). Continue? [y/N] ' "$IMAGE" "$VOLUME"
+        read -r reply
+        case "$reply" in
+            [yY]|[yY][eE][sS])
+                docker rmi "$IMAGE"
+                docker volume rm "$VOLUME"
+                ;;
+            *)
+                echo "Aborted." >&2
+                ;;
+        esac
+        ;;
+    run)
+        ensure_image
+        run_container opencode "$@"
+        ;;
+    yolo)
+        ensure_image
+        run_container opencode --auto "$@"
+        ;;
+esac
