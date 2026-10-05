@@ -50,38 +50,48 @@ of where it's called from.
 ## Usage
 
 ```
-claude-yolo [--workspace <path>] [subcommand] [args...]
+claude-yolo [--help] [<workspace-path> | --workspace <path>] [subcommand] [-- <args for claude>]
 ```
+
+Run `claude-yolo --help` for the full usage at any time.
 
 | Subcommand | Behaviour |
 |---|---|
 | *(none)* | Same as `yolo`. |
-| `yolo [args...]` | Build the image if it doesn't exist yet, then run `claude --dangerously-skip-permissions [args...]` inside it. |
-| `run [args...]` | Same, but launches plain `claude [args...]` — normal permission prompts apply. Useful when you want the sandbox's tooling/isolation without skipping permissions. |
+| `yolo [-- args...]` | Build the image if it doesn't exist yet, then run `claude --dangerously-skip-permissions [args...]` inside it. |
+| `run [-- args...]` | Same, but launches plain `claude [args...]` — normal permission prompts apply. Useful when you want the sandbox's tooling/isolation without skipping permissions. |
 | `rebuild` | Force a fresh `docker build`. Doesn't start a container. Run this after editing the `Dockerfile`, or to pick up newer floating package versions (e.g. a .NET SDK patch) — `run`/`yolo` reuse an existing image and never rebuild automatically. |
 | `nuke` | Removes the built image **and** the `claude-yolo-home` volume (your persisted login), after confirmation. This is the only thing that clears a saved login. |
 
-Any arguments after the subcommand (or after `claude-yolo` itself, in the
-no-args default) are passed straight through to `claude`, e.g.:
+Arguments meant for `claude` itself (for `run`/`yolo` modes) must come after
+a literal `--`, so they're never mistaken for a workspace path or
+subcommand:
 
 ```sh
-claude-yolo "fix the failing test in Foo.cs"
-claude-yolo run "review this PR"
+claude-yolo -- "fix the failing test in Foo.cs"
+claude-yolo run -- "review this PR"
+claude-yolo run -- --model opus -p "one-shot query"
 ```
 
 ### Choosing the workspace folder
 
 By default, the folder mounted as `/workspace` is this script's own parent
-directory. Point it at a different project with `--workspace`, which must
-come *before* the subcommand:
+directory. Point it at a different project with a bare path argument, or
+the equivalent explicit `--workspace` flag — either must come *before* the
+subcommand:
 
 ```sh
+claude-yolo ~/code/some-other-project yolo
 claude-yolo --workspace ~/code/some-other-project yolo
 ```
 
+A directory named exactly `run`, `yolo`, `rebuild`, or `nuke` needs an
+explicit form like `./run` to be used as a workspace path, since those four
+words are always read as subcommands first.
+
 No rebuild is needed — this is just a different `docker run -v` argument
 each time. You can run multiple `claude-yolo` invocations concurrently
-against different `--workspace` paths; each gets its own container and
+against different workspace paths; each gets its own container and
 `/workspace`, while all of them share the same persisted login (see below).
 
 ## Login persistence and config from your host

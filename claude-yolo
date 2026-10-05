@@ -1,33 +1,8 @@
 #!/bin/sh
 # Runs the claude-yolo sandbox against the stacyclouds folder tree.
 #
-# Usage:
-#   claude-yolo [--workspace <path>] [subcommand] [args passed through to claude]
-#
-#   --workspace <path>   mount <path> as /workspace instead of the script's
-#                        own parent directory. Must come before the
-#                        subcommand (if any). No rebuild required — this is
-#                        a docker run -v argument, resolved fresh each call.
-#   (no subcommand)      same as "yolo"
-#   yolo    [args...]    ensure the image exists (building it only if
-#                        missing), then run claude --dangerously-skip-
-#                        permissions [args...] (YOLO mode)
-#   run     [args...]    same image-ensure behavior, then run claude
-#                        [args...] with normal permission prompts
-#   rebuild              force a fresh docker build; does not run a
-#                        container
-#   nuke [--preserve-token]
-#                        remove the built image and the claude-yolo-home
-#                        volume (your persisted Claude login), after
-#                        confirmation. With --preserve-token, the volume
-#                        is emptied instead of removed, keeping only
-#                        ~/.claude/.credentials.json (your OAuth token)
-#                        so the next run skips the login flow.
-#
-# Note: after the first build, "run"/"yolo" reuse the existing image and
-# do NOT rebuild automatically — run "claude-yolo rebuild" explicitly to
-# pick up Dockerfile changes or newer floating package versions (e.g.
-# .NET SDK patches).
+# Usage: claude-yolo --help   (or run with no arguments for a quick reminder
+#                              of the most common invocations)
 #
 # Safe to YOLO because the container has no git binary and can't reach
 # anything outside the mounted project folder.
@@ -36,6 +11,52 @@
 # PATH. Resolves the symlink itself so the Dockerfile/context can be found
 # regardless of where it's invoked from.
 set -eu
+
+print_help() {
+    cat <<'EOF'
+Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [subcommand] [-- <args for claude>]
+
+  --help, -h           Show this help and exit. Short-circuits everything
+                       else: no Docker interaction, no workspace validation.
+
+  <workspace-path>     Mount this host folder as /workspace instead of the
+  --workspace <path>   script's own parent directory. Must exist. No rebuild
+                       required - this is a docker run -v argument, resolved
+                       fresh each call. Either spelling works the same way
+                       and must come before the subcommand. A directory
+                       named exactly "run", "yolo", "rebuild", or "nuke"
+                       needs an explicit form (e.g. ./run) since those
+                       four words are always read as subcommands first.
+
+Subcommands:
+  (none)               Same as "yolo".
+  yolo    [-- args...] Ensure the image exists (building it only if
+                       missing), then run claude --dangerously-skip-
+                       permissions [args...] (YOLO mode).
+  run     [-- args...] Same image-ensure behavior, then run claude
+                       [args...] with normal permission prompts.
+  rebuild              Force a fresh docker build; does not run a container.
+  nuke [--preserve-token]
+                       Remove the built image and the claude-yolo-home
+                       volume (your persisted Claude login), after
+                       confirmation. With --preserve-token, the volume is
+                       emptied instead of removed, keeping only
+                       ~/.claude/.credentials.json (your OAuth token).
+
+Everything after "--" is forwarded verbatim to the claude invocation
+(ignored for rebuild/nuke, which never launch claude). Use "--" whenever an
+argument to claude itself starts with "-", or whenever you're passing a
+prompt string, so it can never be mistaken for a workspace path or
+subcommand.
+
+Examples:
+  claude-yolo
+  claude-yolo run -- "review this file"
+  claude-yolo ../other-project run
+  claude-yolo ../other-project -- --model opus -p "one-shot query"
+  claude-yolo rebuild
+EOF
+}
 
 resolve_path() {
     target="$1"
@@ -50,6 +71,15 @@ resolve_path() {
     printf '%s\n' "$target"
 }
 
+# --help/-h short-circuits everything else: no Docker interaction, no
+# workspace validation, exits immediately.
+case "${1:-}" in
+    --help|-h)
+        print_help
+        exit 0
+        ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$(resolve_path "$0")")" && pwd)"
 
 IMAGE=claude-yolo
@@ -57,9 +87,9 @@ VOLUME=claude-yolo-home
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # --workspace must come before the subcommand: args after the subcommand (or
-# after claude-yolo itself in the no-args/yolo default) are forwarded
-# verbatim to `claude` inside the container, so allowing --workspace there
-# too would make it ambiguous which side it was meant for.
+# after claude-yolo itself in the no-args/yolo default) are only reachable
+# past a "--" separator (see below), so allowing --workspace there too would
+# make it ambiguous which side it was meant for.
 if [ "${1:-}" = "--workspace" ]; then
     if [ "$#" -lt 2 ]; then
         echo "claude-yolo: --workspace requires a path argument" >&2
@@ -71,6 +101,30 @@ if [ "${1:-}" = "--workspace" ]; then
     fi
     PROJECT_DIR="$(cd "$2" && pwd)"
     shift 2
+elif [ "$#" -ge 1 ]; then
+    # A bare leading argument that isn't a recognized subcommand keyword is
+    # treated as a workspace-path override (the same thing --workspace does,
+    # just without the flag) - this is what lets `claude-yolo .` mount the
+    # current directory instead of silently becoming a `claude` argument.
+    # Subcommand keywords always win: a directory literally named "run" (or
+    # "yolo"/"rebuild"/"nuke") needs an explicit form like `./run` to be
+    # used as a workspace path.
+    case "$1" in
+        rebuild|nuke|run|yolo|--)
+            ;;
+        -*)
+            echo "claude-yolo: unknown option '$1' (see claude-yolo --help)" >&2
+            exit 1
+            ;;
+        *)
+            if [ ! -d "$1" ]; then
+                echo "claude-yolo: '$1' does not exist as a directory to mount as the workspace, and is not a recognized subcommand - if this was meant for claude, use '--' before it (e.g. claude-yolo -- '$1')" >&2
+                exit 1
+            fi
+            PROJECT_DIR="$(cd "$1" && pwd)"
+            shift
+            ;;
+    esac
 fi
 
 # Mounted read-only at run time (not baked into the image) so edits to your
@@ -120,6 +174,21 @@ case "${1:-}" in
         shift
         ;;
 esac
+
+# Arguments meant for `claude` itself (for run/yolo modes) must come after a
+# literal "--", so they can never be mistaken for a workspace path or
+# subcommand. rebuild/nuke don't forward anything to claude, so this doesn't
+# apply to them (nuke has its own --preserve-token flag, parsed in its own
+# branch below).
+require_dashdash() {
+    case "$1" in
+        --) ;;
+        *)
+            echo "claude-yolo: unexpected argument '$1' - use '--' before arguments meant for claude (e.g. claude-yolo $MODE -- '$1')" >&2
+            exit 1
+            ;;
+    esac
+}
 
 case "$MODE" in
     rebuild)
@@ -181,10 +250,18 @@ case "$MODE" in
         esac
         ;;
     run)
+        if [ "$#" -gt 0 ]; then
+            require_dashdash "$1"
+            shift
+        fi
         ensure_image
         run_container claude "$@"
         ;;
     yolo)
+        if [ "$#" -gt 0 ]; then
+            require_dashdash "$1"
+            shift
+        fi
         ensure_image
         run_container claude --dangerously-skip-permissions "$@"
         ;;
