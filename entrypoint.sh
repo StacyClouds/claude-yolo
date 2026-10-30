@@ -23,10 +23,12 @@
 # provided one under that name.
 set -eu
 
-HOST_CLAUDE=/home/node/.claude-host
-LOCAL_CLAUDE=/home/node/.claude
-CLAUDE_JSON=/home/node/.claude.json
-BAKED_SKILLS=/opt/skills
+HOST_CLAUDE="${CLAUDE_YOLO_HOST_CLAUDE:-/home/node/.claude-host}"
+LOCAL_CLAUDE="${CLAUDE_YOLO_LOCAL_CLAUDE:-/home/node/.claude}"
+CLAUDE_JSON="${CLAUDE_YOLO_CLAUDE_JSON:-/home/node/.claude.json}"
+BAKED_SKILLS="${CLAUDE_YOLO_BAKED_SKILLS:-/opt/skills}"
+BAKED_STATUSLINE="${CLAUDE_YOLO_BAKED_STATUSLINE:-/opt/statusline}"
+OPENSPEC_BAKED="${CLAUDE_YOLO_OPENSPEC_BAKED:-/opt/openspec-baked}"
 
 # Pre-accept the "do you trust the files in this folder?" dialog for the
 # project mount. /workspace is always the in-container mount point (see the
@@ -113,6 +115,16 @@ if [ -d "$HOST_CLAUDE" ]; then
     done
 fi
 
+# Default status line script: installed whenever the host didn't provide its
+# own (or there is no host mount at all), replacing any copy left on the
+# claude-yolo-home volume by an earlier run so a rebuilt image's newer default
+# reaches an existing volume. A host-provided script was already copied in
+# above and is never touched here.
+if [ ! -e "$HOST_CLAUDE/statusline-command.sh" ] && [ -f "$BAKED_STATUSLINE/statusline-command.sh" ]; then
+    mkdir -p "$LOCAL_CLAUDE"
+    cp -f "$BAKED_STATUSLINE/statusline-command.sh" "$LOCAL_CLAUDE/statusline-command.sh"
+fi
+
 # Force-accept the "Bypass Permissions mode" confirmation dialog. Claude Code
 # persists your acceptance of it as skipDangerousModePermissionPrompt in the
 # global user settings.json — normally a one-time flag set the first time you
@@ -129,6 +141,14 @@ mkdir -p "$LOCAL_CLAUDE"
 jq '.skipDangerousModePermissionPrompt = true' "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
 mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 
+# Default status line setting: only when the (host-synced) settings.json has
+# no statusLine of its own. Runs here, after the host sync, so a host-defined
+# statusLine always wins, and so a container with no host mount (which has
+# just had settings.json created above) still gets one.
+jq '.statusLine //= {type: "command", command: "bash ~/.claude/statusline-command.sh", padding: 0}' \
+    "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
+mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
+
 # The serena plugin's own .mcp.json (synced from the host's ~/.claude above,
 # or from a fresh marketplace install inside the container) launches it via
 # `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`.
@@ -140,7 +160,7 @@ mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 # invocation to call that pre-baked binary directly, so no git operation is
 # ever attempted at runtime. Only rewrites the exact shape the marketplace
 # ships today, so an unrelated or already-patched .mcp.json is left alone.
-SERENA_BIN=/opt/serena-tool/bin/serena
+SERENA_BIN="${CLAUDE_YOLO_SERENA_BIN:-/opt/serena-tool/bin/serena}"
 if [ -x "$SERENA_BIN" ]; then
     find "$LOCAL_CLAUDE/plugins" -name ".mcp.json" 2>/dev/null | while IFS= read -r f; do
         if jq -e --arg url "git+https://github.com/oraios/serena" \
@@ -187,7 +207,7 @@ backfill() {
 }
 
 backfill "$BAKED_SKILLS" "$LOCAL_CLAUDE/skills"
-backfill /opt/openspec-baked/.claude/skills "$LOCAL_CLAUDE/skills"
-backfill /opt/openspec-baked/.claude/commands "$LOCAL_CLAUDE/commands"
+backfill "$OPENSPEC_BAKED/.claude/skills" "$LOCAL_CLAUDE/skills"
+backfill "$OPENSPEC_BAKED/.claude/commands" "$LOCAL_CLAUDE/commands"
 
 exec tini -- "$@"

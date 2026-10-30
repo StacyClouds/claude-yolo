@@ -175,6 +175,13 @@ Baked into the image, on top of a pinned version of Claude Code itself:
   them; if your host's `~/.claude` has its own version, that wins.
 - **`frontend-design` skill** — same backfill treatment, from
   `/opt/skills`.
+- **Default status line** — `statusline-command.sh`, baked under
+  `/opt/statusline`. When your host's `~/.claude` has no
+  `statusline-command.sh`, it is installed into `~/.claude` on every start
+  (or when there is no host `~/.claude` at all), and `statusLine` is set in
+  the container's `settings.json` to run it. A `statusLine` setting or
+  script from your host always wins. Needs a Nerd Font in your terminal for
+  its icons.
 - **Python 3 + `uv`/`uvx`** — a general-purpose Python tool runner, available
   at runtime for any plugin or script that wants it.
 - **`serena`, pre-installed at build time** — the `serena` plugin (if your

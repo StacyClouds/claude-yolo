@@ -219,6 +219,12 @@ ENV PATH="${PATH}:/home/node/.dotnet/tools"
 RUN openspec init --tools claude --force --no-animation /opt/openspec-baked \
     && chown -R node:node /opt/openspec-baked
 
+# Default status line, baked outside /home/node for the same reason as the
+# OpenSpec content above (the claude-yolo-home volume would shadow it).
+# entrypoint.sh installs it into /home/node/.claude when the host has no
+# statusline-command.sh of its own.
+COPY --chown=root:root statusline-command.sh /opt/statusline/statusline-command.sh
+
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
