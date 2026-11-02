@@ -30,6 +30,10 @@ BAKED_SKILLS="${CLAUDE_YOLO_BAKED_SKILLS:-/opt/skills}"
 BAKED_STATUSLINE="${CLAUDE_YOLO_BAKED_STATUSLINE:-/opt/statusline}"
 OPENSPEC_BAKED="${CLAUDE_YOLO_OPENSPEC_BAKED:-/opt/openspec-baked}"
 
+# /home/node/dn is DOTNET_CLI_HOME (see Dockerfile); recreate it in case the
+# claude-yolo-home volume predates it.
+mkdir -p "${DOTNET_CLI_HOME:-/home/node/dn}"
+
 # Pre-accept the "do you trust the files in this folder?" dialog for the
 # project mount. /workspace is always the in-container mount point (see the
 # claude-yolo script's `docker run -v ... :/workspace`), so this one fixed
@@ -62,7 +66,7 @@ mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
 # below) persist — add the plugin to the host's own settings.json if you
 # want it to stay enabled by default too.
 DIR_ITEMS="agents commands skills plugins rules workflows"
-FILE_ITEMS="CLAUDE.md settings.json settings.local.json keybindings.json statusline-command.sh statusline-command.ps1"
+FILE_ITEMS="CLAUDE.md settings.json settings.local.json keybindings.json"
 
 if [ -d "$HOST_CLAUDE" ]; then
     mkdir -p "$LOCAL_CLAUDE"
@@ -115,12 +119,14 @@ if [ -d "$HOST_CLAUDE" ]; then
     done
 fi
 
-# Default status line script: installed whenever the host didn't provide its
-# own (or there is no host mount at all), replacing any copy left on the
-# claude-yolo-home volume by an earlier run so a rebuilt image's newer default
-# reaches an existing volume. A host-provided script was already copied in
-# above and is never touched here.
-if [ ! -e "$HOST_CLAUDE/statusline-command.sh" ] && [ -f "$BAKED_STATUSLINE/statusline-command.sh" ]; then
+# Status line script: always the one baked into the image. The host's own
+# statusline-command.sh is deliberately not synced (see FILE_ITEMS): host
+# scripts typically assume host paths and tools, and the host's statusLine
+# setting usually points at a host-only path like /Users/<name>/.claude/...,
+# which would fail silently here. Replaces any copy left on the
+# claude-yolo-home volume so a rebuilt image's newer default reaches an
+# existing volume.
+if [ -f "$BAKED_STATUSLINE/statusline-command.sh" ]; then
     mkdir -p "$LOCAL_CLAUDE"
     cp -f "$BAKED_STATUSLINE/statusline-command.sh" "$LOCAL_CLAUDE/statusline-command.sh"
 fi
@@ -141,11 +147,10 @@ mkdir -p "$LOCAL_CLAUDE"
 jq '.skipDangerousModePermissionPrompt = true' "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
 mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 
-# Default status line setting: only when the (host-synced) settings.json has
-# no statusLine of its own. Runs here, after the host sync, so a host-defined
-# statusLine always wins, and so a container with no host mount (which has
-# just had settings.json created above) still gets one.
-jq '.statusLine //= {type: "command", command: "bash ~/.claude/statusline-command.sh", padding: 0}' \
+# Status line setting: always the container's, overriding any statusLine
+# synced from the host's settings.json. Runs after the host sync for that
+# reason, and so a container with no host mount still gets one.
+jq '.statusLine = {type: "command", command: "bash ~/.claude/statusline-command.sh", padding: 0}' \
     "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
 mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 

@@ -206,6 +206,54 @@ WORKDIR /
 RUN rm -rf /tmp/stryker-install
 ENV PATH="${PATH}:/home/node/.dotnet/tools"
 
+# Writable dotnet home for the node user. The default ~/.dotnet can be
+# permission-denied here, and a long path breaks the template-engine mutex.
+# Set as image ENV (not just a profile.d/.bashrc edit) so non-interactive
+# processes — e.g. Claude Code spawning the Aspire MCP server — get it too.
+# entrypoint.sh re-creates the dir on every start, since /home/node is the
+# claude-yolo-home volume and may predate this image.
+ENV DOTNET_CLI_HOME=/home/node/dn
+ENV DOTNET_NOLOGO=1
+ENV ASPIRE_CLI_TELEMETRY_OPTOUT=1
+RUN mkdir -p /home/node/dn && chown node:node /home/node/dn \
+    && printf 'export DOTNET_CLI_HOME=/home/node/dn\nexport DOTNET_NOLOGO=1\nexport ASPIRE_CLI_TELEMETRY_OPTOUT=1\n' \
+        > /etc/profile.d/dotnet-home.sh
+
+# Aspire CLI (a dotnet tool; provides `aspire` and `aspire agent mcp` for the
+# Aspire MCP server). 13.6.4 is the latest stable on NuGet at time of writing;
+# bump it to match the Aspire.AppHost.Sdk version of mounted projects.
+# Installed with --tool-path under /opt (not ~/.dotnet/tools) so the
+# claude-yolo-home volume can't shadow it, then symlinked into
+# /usr/local/bin so non-interactive processes (which don't source any shell
+# profile) find it. `tool update` installs when absent, so this is idempotent.
+# Pinned to the 10.0 SDK via scratch global.json for the same reason as the
+# stryker install above. `aspire agent init` is deliberately NOT run: it
+# writes project files (.mcp.json, skills, hooks) into the mounted workspace.
+ARG ASPIRE_CLI_VERSION=13.6.4
+WORKDIR /tmp/aspire-install
+RUN printf '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json \
+    && dotnet tool update Aspire.Cli --tool-path /opt/aspire-cli --version "${ASPIRE_CLI_VERSION}" \
+    && rm -f global.json \
+    && ln -sf /opt/aspire-cli/aspire /usr/local/bin/aspire \
+    && chown -R node:node /opt/aspire-cli /home/node/dn
+WORKDIR /
+RUN rm -rf /tmp/aspire-install
+
+# Hadolint (Dockerfile linter), as the upstream static binary. Release assets
+# are named by uname-style arch (x86_64 / arm64), hence the dpkg mapping — the
+# image builds on both amd64 and arm64. Pinned via ARG (bump deliberately;
+# 2.15.1 is the latest release at time of writing). Picks up /workspace's
+# .hadolint.yaml automatically when run from a mounted project.
+ARG HADOLINT_VERSION=2.15.1
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) HADOLINT_ARCH=x86_64 ;; \
+        arm64) HADOLINT_ARCH=arm64 ;; \
+        *) echo "unsupported architecture" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/hadolint \
+        "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-${HADOLINT_ARCH}" \
+    && chmod +x /usr/local/bin/hadolint
+
 # Bake OpenSpec's Claude Code integration — the `opsx:*` commands
 # (.claude/commands/opsx) and openspec-* skills (.claude/skills) — into
 # /opt, NOT into /home/node/.claude directly. /home/node is the

@@ -123,7 +123,7 @@ new_sandbox hostscript
 echo '# host script' > "$HOST/statusline-command.sh"
 echo '{}' > "$HOST/settings.json"
 if run_entrypoint; then
-    expect_file_content "$LOCAL/statusline-command.sh" '# host script' "host script wins over the default"
+    expect_file_content "$LOCAL/statusline-command.sh" '# baked default' "host script is ignored in favour of the baked one"
 fi
 
 # --- Host provides its own statusLine setting ---
@@ -132,10 +132,11 @@ new_sandbox hostsetting
 echo '{"statusLine":{"type":"command","command":"echo custom","padding":2}}' > "$HOST/settings.json"
 if run_entrypoint; then
     actual="$(jq -c '.statusLine' "$LOCAL/settings.json")"
-    if [ "$actual" = '{"type":"command","command":"echo custom","padding":2}' ]; then
+    want="$(jq -cn --arg c "$DEFAULT_STATUS_COMMAND" '{type: "command", command: $c, padding: 0}')"
+    if [ "$actual" = "$want" ]; then
         pass
     else
-        fail "$CURRENT: host statusLine must be kept unchanged (got $actual)"
+        fail "$CURRENT: host statusLine must be replaced by the container's (got $actual)"
     fi
 fi
 
@@ -145,8 +146,8 @@ new_sandbox scriptnosetting
 echo '# host script' > "$HOST/statusline-command.sh"
 echo '{}' > "$HOST/settings.json"
 if run_entrypoint; then
-    expect_file_content "$LOCAL/statusline-command.sh" '# host script' "host script is used"
-    expect_status_line "$DEFAULT_STATUS_COMMAND" "statusLine runs the host's script"
+    expect_file_content "$LOCAL/statusline-command.sh" '# baked default' "baked script is used"
+    expect_status_line "$DEFAULT_STATUS_COMMAND" "statusLine runs the baked script"
 fi
 
 # --- Default script is refreshed on a volume that holds an older default ---

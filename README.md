@@ -175,13 +175,12 @@ Baked into the image, on top of a pinned version of Claude Code itself:
   them; if your host's `~/.claude` has its own version, that wins.
 - **`frontend-design` skill** — same backfill treatment, from
   `/opt/skills`.
-- **Default status line** — `statusline-command.sh`, baked under
-  `/opt/statusline`. When your host's `~/.claude` has no
-  `statusline-command.sh`, it is installed into `~/.claude` on every start
-  (or when there is no host `~/.claude` at all), and `statusLine` is set in
-  the container's `settings.json` to run it. A `statusLine` setting or
-  script from your host always wins. Needs a Nerd Font in your terminal for
-  its icons.
+- **Status line** — `statusline-command.sh`, baked under `/opt/statusline`.
+  On every start it is installed into `~/.claude` and `statusLine` is set in
+  the container's `settings.json` to run it. Your host's `statusLine` setting
+  and `statusline-command.sh` are deliberately ignored (they usually point at
+  host-only paths); everything else in your host `settings.json` still
+  syncs. Needs a Nerd Font in your terminal for its icons.
 - **Python 3 + `uv`/`uvx`** — a general-purpose Python tool runner, available
   at runtime for any plugin or script that wants it.
 - **`serena`, pre-installed at build time** — the `serena` plugin (if your
@@ -198,6 +197,13 @@ Baked into the image, on top of a pinned version of Claude Code itself:
 - **.NET SDKs 8, 9, 10, and the latest 11 preview**, plus `dotnet-stryker`
   (mutation testing) as a global `dotnet` tool — usable by the unprivileged
   `node` user the container runs as.
+- **Hadolint** (Dockerfile linter) on the `PATH`, pinned via
+  `HADOLINT_VERSION` in the Dockerfile.
+- **The Aspire CLI** (`aspire`, pinned via `ASPIRE_CLI_VERSION` in the
+  Dockerfile) on the `PATH` of every process, so Claude Code can start the
+  Aspire MCP server (`aspire agent mcp`) from a project's `.mcp.json`.
+  `DOTNET_CLI_HOME` points at a writable `/home/node/dn`. `aspire agent init`
+  is not run at build time; it writes project files.
 - **A writable npm global prefix** — `npm install -g` works at runtime as
   the `node` user, not just during the image build.
 
