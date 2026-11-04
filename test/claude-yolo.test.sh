@@ -22,6 +22,8 @@ cat > "$STUB_BIN/docker" <<'EOF'
 # Records the full invocation (one line) to DOCKER_STUB_LOG and succeeds,
 # so claude-yolo never touches a real Docker daemon during these tests.
 echo "$@" >> "$DOCKER_STUB_LOG"
+# DOCKER_STUB_NO_IMAGE=1 makes `docker image inspect` fail, as if no image is built.
+if [ "${DOCKER_STUB_NO_IMAGE:-}" = 1 ] && [ "${1:-} ${2:-}" = "image inspect" ]; then exit 1; fi
 exit 0
 EOF
 chmod +x "$STUB_BIN/docker"
@@ -47,7 +49,7 @@ run_cli() {
     shift
     : > "$LOG"
     EXIT_CODE=0
-    (cd "$cli_cwd" && PATH="$STUB_BIN:$PATH" DOCKER_STUB_LOG="$LOG" "$CLAUDE_YOLO" "$@") >"$OUT" 2>"$ERR" || EXIT_CODE=$?
+    (cd "$cli_cwd" && HOME="${TEST_HOME:-$HOME}" PATH="$STUB_BIN:$PATH" DOCKER_STUB_LOG="$LOG" "$CLAUDE_YOLO" "$@") >"$OUT" 2>"$ERR" || EXIT_CODE=$?
 }
 
 pass() {
@@ -189,6 +191,112 @@ expect_exit_code 1 "--ports below 1024 fails"
 run_cli "$WORK" --ports 65530 run
 expect_exit_code 1 "--ports range overflowing 65535 fails"
 expect_log_empty "invalid --ports makes no docker calls"
+
+
+# --- rebuild refreshes Claude Code despite cached layers ---
+
+run_cli "$WORK" rebuild
+expect_exit_code 0 "rebuild exits 0"
+expect_log_contains "build" "rebuild runs docker build"
+expect_log_contains "--pull" "rebuild refreshes the base image"
+expect_log_contains "--build-arg CLAUDE_CODE_CACHE_BUST=" "rebuild passes a cache-busting build arg"
+first_bust="$(grep -o 'CLAUDE_CODE_CACHE_BUST=[0-9]*' "$LOG" | head -n 1)"
+sleep 1
+run_cli "$WORK" rebuild
+second_bust="$(grep -o 'CLAUDE_CODE_CACHE_BUST=[0-9]*' "$LOG" | head -n 1)"
+if [ -n "$first_bust" ] && [ "$first_bust" != "$second_bust" ]; then
+    pass
+else
+    fail "consecutive rebuilds use different cache-bust values (got '$first_bust' then '$second_bust')"
+fi
+
+DOCKER_STUB_NO_IMAGE=1
+export DOCKER_STUB_NO_IMAGE
+run_cli "$WORK" run
+expect_log_contains "build -t" "run builds the image when it is missing"
+if grep -qF -- "CLAUDE_CODE_CACHE_BUST" "$LOG" || grep -qF -- "--pull" "$LOG"; then
+    fail "automatic first build must not pass rebuild-only flags (got: $(cat "$LOG"))"
+else
+    pass
+fi
+unset DOCKER_STUB_NO_IMAGE
+
+# --- --secrets: share the workspace's .NET user secrets (see
+# openspec/changes/share-host-user-secrets) ---
+TEST_HOME="$WORK/home"
+export TEST_HOME
+SECRETS_STORE="$TEST_HOME/.microsoft/usersecrets"
+mkdir -p "$SECRETS_STORE/abc-123" "$SECRETS_STORE/other" "$SECRETS_STORE/props-9" "$TEST_HOME/.microsoft/x"
+SEC_WS="$WORK/secws"
+mkdir -p "$SEC_WS/src/App" "$SEC_WS/src/NoHost" "$SEC_WS/src/Bad"
+printf '<Project><PropertyGroup>\n  <UserSecretsId> abc-123 </UserSecretsId>\n</PropertyGroup></Project>\n' > "$SEC_WS/src/App/App.csproj"
+printf '<Project><PropertyGroup><UserSecretsId>nohost-1</UserSecretsId></PropertyGroup></Project>\n' > "$SEC_WS/src/NoHost/NoHost.csproj"
+printf '<Project><PropertyGroup><UserSecretsId>props-9</UserSecretsId></PropertyGroup></Project>\n' > "$SEC_WS/Directory.Build.props"
+printf '<Project><PropertyGroup><UserSecretsId>../x</UserSecretsId><UserSecretsId>.</UserSecretsId><UserSecretsId>..</UserSecretsId></PropertyGroup></Project>\n' > "$SEC_WS/src/Bad/Bad.csproj"
+SEC_MOUNT="-v $SECRETS_STORE/abc-123:/home/node/.microsoft/usersecrets/abc-123:ro"
+
+run_cli "$WORK" "$SEC_WS" run
+expect_exit_code 0 "without --secrets still starts"
+if grep -qF -- "usersecrets" "$LOG" || grep -qF -- "CLAUDE_YOLO_SECRETS" "$LOG"; then
+    fail "without --secrets nothing about user secrets may be passed (got: $(cat "$LOG"))"
+else
+    pass
+fi
+
+run_cli "$WORK" "$SEC_WS" --secrets run
+expect_exit_code 0 "--secrets starts"
+expect_log_contains "$SEC_MOUNT" "--secrets mounts the id found in a .csproj read-only, whitespace trimmed"
+expect_log_contains "-v $SECRETS_STORE/props-9:/home/node/.microsoft/usersecrets/props-9:ro" "--secrets finds ids in Directory.Build.props"
+expect_log_contains "CLAUDE_YOLO_SECRETS=1" "--secrets tells the container"
+if grep -qF -- "usersecrets/other" "$LOG"; then fail "--secrets must not mount ids the workspace does not use"; else pass; fi
+if grep -qF -- "nohost-1" "$LOG"; then fail "--secrets must skip ids with no host folder"; else pass; fi
+if grep -qE -- 'usersecrets(/\.\.?)?:|\.microsoft/x|\.\./x|:/home/node/\.microsoft/usersecrets/\.' "$LOG"; then
+    fail "--secrets must ignore unsafe ids (got: $(cat "$LOG"))"
+else
+    pass
+fi
+
+run_cli "$WORK" "$SEC_WS" --ports 5100 --secrets run
+expect_log_contains "$SEC_MOUNT" "--ports then --secrets both work"
+expect_log_contains "CLAUDE_YOLO_BASE_PORT=5100" "--ports still applies with --secrets"
+run_cli "$WORK" "$SEC_WS" --secrets --ports 5100 run
+expect_log_contains "$SEC_MOUNT" "--secrets then --ports both work"
+expect_log_contains "CLAUDE_YOLO_BASE_PORT=5100" "--ports applies when after --secrets"
+
+run_cli "$WORK" --help
+expect_stdout_contains "--secrets" "--help lists --secrets"
+
+# --- --secrets: ids named only in code, and a root holding many projects ---
+CODE_GUID="fcf4d744-3547-4e43-abb4-be4dd7f1fbfb"
+BIN_GUID="bbbbbbbb-1111-2222-3333-444444444444"
+MD_GUID="dddddddd-1111-2222-3333-444444444444"
+UNUSED_GUID="eeeeeeee-1111-2222-3333-444444444444"
+mkdir -p "$SECRETS_STORE/$CODE_GUID" "$SECRETS_STORE/lit-id" "$SECRETS_STORE/$BIN_GUID" \
+    "$SECRETS_STORE/$MD_GUID" "$SECRETS_STORE/$UNUSED_GUID" "$SECRETS_STORE/proj-b" "$SECRETS_STORE/fs-id"
+ROOT_WS="$WORK/rootws"
+mkdir -p "$ROOT_WS/apphost" "$ROOT_WS/other/src" "$ROOT_WS/apphost/bin/Debug" "$ROOT_WS/apphost/node_modules/x" "$ROOT_WS/docs" "$ROOT_WS/fsapp"
+cat > "$ROOT_WS/apphost/SiteResource.cs" <<CSEOF
+public static class SiteResource {
+    private const string SiteUserSecretsId = "$CODE_GUID";
+    public static void Add(IConfigurationBuilder c) { c.AddUserSecrets(SiteUserSecretsId); c.AddUserSecrets("lit-id"); }
+}
+CSEOF
+printf '<Project><PropertyGroup><UserSecretsId>proj-b</UserSecretsId></PropertyGroup></Project>\n' > "$ROOT_WS/other/src/B.csproj"
+printf 'let c = b.AddUserSecrets<Program>("fs-id")\n' > "$ROOT_WS/fsapp/Program.fs"
+printf 'var x = "%s";\n' "$BIN_GUID" > "$ROOT_WS/apphost/bin/Debug/Gen.cs"
+printf 'var x = "%s";\n' "$BIN_GUID" > "$ROOT_WS/apphost/node_modules/x/y.cs"
+printf 'Notes: %s\n' "$MD_GUID" > "$ROOT_WS/docs/notes.md"
+
+run_cli "$WORK" "$ROOT_WS" --secrets run
+expect_exit_code 0 "--secrets on a root folder starts"
+expect_log_contains "$SECRETS_STORE/$CODE_GUID:/home/node/.microsoft/usersecrets/$CODE_GUID:ro" "id held in a constant and passed by name is mounted"
+expect_log_contains "$SECRETS_STORE/lit-id:/home/node/.microsoft/usersecrets/lit-id:ro" "literal AddUserSecrets(\"id\") is mounted"
+expect_log_contains "$SECRETS_STORE/fs-id:/home/node/.microsoft/usersecrets/fs-id:ro" "literal AddUserSecrets<T>(\"id\") in an .fs file is mounted"
+expect_log_contains "$SECRETS_STORE/proj-b:/home/node/.microsoft/usersecrets/proj-b:ro" "id from a project in another folder under the root is mounted"
+for skipped in "$BIN_GUID" "$MD_GUID" "$UNUSED_GUID" "abc-123" "usersecrets/other"; do
+    if grep -qF -- "$skipped" "$LOG"; then fail "--secrets must not mount '$skipped' (got: $(cat "$LOG"))"; else pass; fi
+done
+unset TEST_HOME
 
 echo ""
 echo "Passed: $PASS_COUNT, Failed: $FAIL_COUNT"

@@ -14,7 +14,7 @@ set -eu
 
 print_help() {
     cat <<'EOF'
-Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [subcommand] [-- <args for claude>]
+Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [--secrets] [subcommand] [-- <args for claude>]
 
   --help, -h           Show this help and exit. Short-circuits everything
                        else: no Docker interaction, no workspace validation.
@@ -36,6 +36,16 @@ Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <ba
                        Must come before the subcommand. Without it nothing
                        is published. Valid base: 1024-65516.
 
+  --secrets            Share this workspace's .NET user secrets with the
+                       container, read-only. Finds every UserSecretsId in
+                       the workspace's *.csproj and Directory.Build.props
+                       files and mounts only those folders from
+                       ~/.microsoft/usersecrets. Anything running in the
+                       container, including Claude, can read them; Claude is
+                       told not to, which is advice, not a block. Must come
+                       before the subcommand (either order with --ports).
+                       Without it nothing is shared.
+
 Subcommands:
   (none)               Same as "yolo".
   yolo    [-- args...] Ensure the image exists (building it only if
@@ -43,7 +53,8 @@ Subcommands:
                        permissions [args...] (YOLO mode).
   run     [-- args...] Same image-ensure behavior, then run claude
                        [args...] with normal permission prompts.
-  rebuild              Force a fresh docker build; does not run a container.
+  rebuild              Force a fresh docker build (refreshes Claude Code and
+                       the base image); does not run a container.
   nuke [--preserve-token]
                        Remove the built image and the claude-yolo-home
                        volume (your persisted Claude login), after
@@ -119,7 +130,7 @@ elif [ "$#" -ge 1 ]; then
     # "yolo"/"rebuild"/"nuke") needs an explicit form like `./run` to be
     # used as a workspace path.
     case "$1" in
-        rebuild|nuke|run|yolo|--|--ports)
+        rebuild|nuke|run|yolo|--|--ports|--secrets)
             ;;
         -*)
             echo "claude-yolo: unknown option '$1' (see claude-yolo --help)" >&2
@@ -136,28 +147,91 @@ elif [ "$#" -ge 1 ]; then
     esac
 fi
 
-# --ports <base> publishes <base>..<base>+19 (see print_help). Goes after any
-# workspace path/--workspace and before the subcommand, for the same
-# ambiguity reason as --workspace above.
+# --ports <base> publishes <base>..<base>+19 and --secrets shares the
+# workspace's .NET user secrets (see print_help). Both go after any workspace
+# path/--workspace and before the subcommand, for the same ambiguity reason as
+# --workspace above, and may appear in either order.
 PORT_BASE=""
 PORT_COUNT=20
-if [ "${1:-}" = "--ports" ]; then
-    if [ "$#" -lt 2 ]; then
-        echo "claude-yolo: --ports requires a base port argument" >&2
-        exit 1
-    fi
-    case "$2" in
-        ''|*[!0-9]*)
-            echo "claude-yolo: --ports base '$2' is not a number" >&2
-            exit 1
+SHARE_SECRETS=""
+while :; do
+    case "${1:-}" in
+        --ports)
+            if [ "$#" -lt 2 ]; then
+                echo "claude-yolo: --ports requires a base port argument" >&2
+                exit 1
+            fi
+            case "$2" in
+                ''|*[!0-9]*)
+                    echo "claude-yolo: --ports base '$2' is not a number" >&2
+                    exit 1
+                    ;;
+            esac
+            if [ "$2" -lt 1024 ] || [ "$2" -gt $((65535 - PORT_COUNT + 1)) ]; then
+                echo "claude-yolo: --ports base must be between 1024 and $((65535 - PORT_COUNT + 1))" >&2
+                exit 1
+            fi
+            PORT_BASE="$2"
+            shift 2
+            ;;
+        --secrets)
+            SHARE_SECRETS=1
+            shift
+            ;;
+        *)
+            break
             ;;
     esac
-    if [ "$2" -lt 1024 ] || [ "$2" -gt $((65535 - PORT_COUNT + 1)) ]; then
-        echo "claude-yolo: --ports base must be between 1024 and $((65535 - PORT_COUNT + 1))" >&2
-        exit 1
-    fi
-    PORT_BASE="$2"
-    shift 2
+done
+
+# One "host:container:ro" mount per secrets id the workspace refers to whose
+# folder exists in the host's user-secrets store. The store is the filter: only
+# folders that exist there are ever mounted, never the whole store. Candidate
+# ids come from one pass over the workspace's project and source files:
+#   - <UserSecretsId> elements;
+#   - the literal in AddUserSecrets("id") / AddUserSecrets<T>("id") and in an
+#     assignment to a name ending in UserSecretsId (an app can load a second
+#     set by an id that is only a string in code);
+#   - any GUID-shaped string, which catches such an id held in a constant and
+#     passed by name (AddUserSecrets(SiteUserSecretsId)).
+# Ids are checked against a plain-identifier pattern (and "." / ".." are
+# rejected) so a project file cannot point a mount at some other host path.
+# Ids split over several lines, built at run time or kept in other file types
+# are not found.
+SECRET_MOUNTS=""
+collect_secret_mounts() {
+    store="$HOME/.microsoft/usersecrets"
+    guid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    pat="$guid"
+    pat="$pat|<UserSecretsId>[^<]*</UserSecretsId>"
+    pat="$pat|AddUserSecrets(<[^>]*>)?\\(\"[^\"]*\"\\)"
+    pat="$pat|[A-Za-z_]*UserSecretsId[[:space:]]*=[[:space:]]*\"[^\"]*\""
+    ids="$(grep -rhoE \
+            --include='*.cs' --include='*.fs' --include='*.vb' \
+            --include='*.razor' --include='*.cshtml' \
+            --include='*.csproj' --include='*.fsproj' --include='*.vbproj' \
+            --include='*.props' --include='*.targets' \
+            --exclude-dir=.git --exclude-dir=node_modules \
+            --exclude-dir=bin --exclude-dir=obj \
+            -e "$pat" "$PROJECT_DIR" 2>/dev/null \
+        | sed -E -e 's|^<UserSecretsId>(.*)</UserSecretsId>$|\1|' \
+                 -e 's|^AddUserSecrets(<[^>]*>)?\("(.*)"\)$|\2|' \
+                 -e 's|^[A-Za-z_]*UserSecretsId[[:space:]]*=[[:space:]]*"(.*)"$|\1|' \
+                 -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        | sort -u)"
+    while IFS= read -r id; do
+        case "$id" in
+            ''|.|..|*[!A-Za-z0-9._-]*) continue ;;
+        esac
+        [ -d "$store/$id" ] || continue
+        SECRET_MOUNTS="$SECRET_MOUNTS$store/$id:/home/node/.microsoft/usersecrets/$id:ro
+"
+    done <<IDS
+$ids
+IDS
+}
+if [ -n "$SHARE_SECRETS" ]; then
+    collect_secret_mounts
 fi
 
 # Mounted read-only at run time (not baked into the image) so edits to your
@@ -175,8 +249,10 @@ if [ -d "$HOME/.claude" ]; then
     CLAUDE_CONFIG_MOUNT="--volume=$HOME/.claude:/home/node/.claude-host:ro"
 fi
 
+# Extra arguments are passed through to docker build (rebuild uses this to
+# defeat the layer cache for the Claude Code install).
 build_image() {
-    docker build -t "$IMAGE" "$SCRIPT_DIR"
+    docker build "$@" -t "$IMAGE" "$SCRIPT_DIR"
 }
 
 image_exists() {
@@ -190,17 +266,43 @@ ensure_image() {
 }
 
 run_container() {
+    # The docker options are built in the positional parameters so that a
+    # variable number of -v arguments (paths may contain spaces) can sit before
+    # the image: they are appended after claude's own arguments, then claude's
+    # arguments are rotated to the end.
+    n=$#
     # claude-yolo-home persists Claude's login/auth across container runs,
     # separate from the project bind mount so it never lands inside a repo.
-    docker run -it --rm \
-        -v "$PROJECT_DIR":/workspace \
-        -v "$VOLUME":/home/node \
-        ${CLAUDE_CONFIG_MOUNT:+"$CLAUDE_CONFIG_MOUNT"} \
-        ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY} \
-        ${PORT_BASE:+-p "127.0.0.1:$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1)):$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1))"} \
-        ${PORT_BASE:+-e "CLAUDE_YOLO_BASE_PORT=$PORT_BASE"} \
-        ${PORT_BASE:+-e "CLAUDE_YOLO_PORT_COUNT=$PORT_COUNT"} \
-        "$IMAGE" "$@"
+    set -- "$@" -it --rm -v "$PROJECT_DIR":/workspace -v "$VOLUME":/home/node
+    if [ -n "$CLAUDE_CONFIG_MOUNT" ]; then
+        set -- "$@" "$CLAUDE_CONFIG_MOUNT"
+    fi
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        set -- "$@" -e ANTHROPIC_API_KEY
+    fi
+    if [ -n "$PORT_BASE" ]; then
+        set -- "$@" -p "127.0.0.1:$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1)):$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1))" \
+            -e "CLAUDE_YOLO_BASE_PORT=$PORT_BASE" -e "CLAUDE_YOLO_PORT_COUNT=$PORT_COUNT"
+    fi
+    if [ -n "$SHARE_SECRETS" ]; then
+        set -- "$@" -e "CLAUDE_YOLO_SECRETS=1"
+        while IFS= read -r m; do
+            if [ -n "$m" ]; then
+                set -- "$@" -v "$m"
+            fi
+        done <<MOUNTS
+$SECRET_MOUNTS
+MOUNTS
+    fi
+    set -- "$@" "$IMAGE"
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        a="$1"
+        shift
+        set -- "$@" "$a"
+        i=$((i + 1))
+    done
+    docker run "$@"
 }
 
 MODE=yolo
@@ -228,7 +330,7 @@ require_dashdash() {
 
 case "$MODE" in
     rebuild)
-        build_image
+        build_image --pull --build-arg "CLAUDE_CODE_CACHE_BUST=$(date +%s)"
         ;;
     nuke)
         PRESERVE_TOKEN=0

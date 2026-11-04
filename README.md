@@ -50,7 +50,7 @@ of where it's called from.
 ## Usage
 
 ```
-claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [subcommand] [-- <args for claude>]
+claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [--secrets] [subcommand] [-- <args for claude>]
 ```
 
 Run `claude-yolo --help` for the full usage at any time.
@@ -60,7 +60,7 @@ Run `claude-yolo --help` for the full usage at any time.
 | *(none)* | Same as `yolo`. |
 | `yolo [-- args...]` | Build the image if it doesn't exist yet, then run `claude --dangerously-skip-permissions [args...]` inside it. |
 | `run [-- args...]` | Same, but launches plain `claude [args...]` — normal permission prompts apply. Useful when you want the sandbox's tooling/isolation without skipping permissions. |
-| `rebuild` | Force a fresh `docker build`. Doesn't start a container. Run this after editing the `Dockerfile`, or to pick up newer floating package versions (e.g. a .NET SDK patch) — `run`/`yolo` reuse an existing image and never rebuild automatically. |
+| `rebuild` | Force a fresh `docker build`. Doesn't start a container. Always reinstalls the latest Claude Code and pulls the newest base image; earlier layers (apt packages, Serena) stay cached. Run this after editing the `Dockerfile`, or to pick up newer floating package versions (e.g. a .NET SDK patch) — `run`/`yolo` reuse an existing image and never rebuild automatically. |
 | `nuke` | Removes the built image **and** the `claude-yolo-home` volume (your persisted login), after confirmation. This is the only thing that clears a saved login. |
 
 Arguments meant for `claude` itself (for `run`/`yolo` modes) must come after
@@ -117,6 +117,49 @@ endpoint belongs on (`<base>` main app, `+1` second app, `+2` Aspire dashboard,
 `+3`/`+4` Aspire OTLP/resource service, `+5`.. others) and to bind `0.0.0.0` over
 plain HTTP. The port mapping is enforced by Docker; *which port an app uses* is
 Claude following those instructions, not something the container can force.
+
+### Running apps with your .NET user secrets (`--secrets`)
+
+Nothing is shared by default. To let apps in the container read the user
+secrets they have on your machine:
+
+```sh
+claude-yolo --secrets
+claude-yolo ~/code/proj --ports 5100 --secrets yolo   # either order
+```
+
+`claude-yolo` scans the workspace and mounts, read-only at the same path in the
+container, only the folders from `~/.microsoft/usersecrets` (macOS and Linux
+hosts) that the workspace refers to. It looks for:
+
+- `<UserSecretsId>` in `*.csproj`, `*.fsproj`, `*.vbproj`, `*.props` and
+  `*.targets` files;
+- ids written in code: `AddUserSecrets("id")` and constants such as
+  `private const string SiteUserSecretsId = "..."`;
+- any GUID-shaped string in `*.cs`, `*.fs`, `*.vb`, `*.razor`, `*.cshtml` and
+  the project files above. This is what finds an id kept in a constant and
+  passed by name, as in `AddUserSecrets(SiteUserSecretsId)`.
+
+`.git`, `node_modules`, `bin` and `obj` are skipped. A candidate is only used if
+a folder of that name exists on your machine, so a stray GUID in source mounts
+nothing. Start in a folder that holds several projects and the secrets of all of
+them are shared; secrets for projects outside it are not. An id that is built at
+run time, split over lines or kept only in another file type (`.md`, `.json`) is
+not found. Read-only means `dotnet user-secrets set` fails inside the container.
+
+**Anything running in the container can read these files, including Claude,
+which has no permission prompts in `yolo` mode and can reach the network.** Two
+guardrails are added, and both are advice rather than a block: a rule in the
+container's `CLAUDE.md` telling Claude never to read, print or send them, and a
+`Read(//home/node/.microsoft/usersecrets/**)` deny rule in its `settings.json`,
+which Claude Code applies on a best-effort basis to its Grep and Glob tools and
+to shell commands it recognises, such as `cat`. A shell command written another
+way, or a script, can still read the files, because Claude and your app run as
+the same user. In a container started with `--secrets` in `yolo` mode, Claude could not read the secret values, so the deny rule is enforced there. Share secrets only for projects you are comfortable with that.
+
+Values that point at `localhost` (a database, an emulator) need overriding
+inside the container to `host.docker.internal`, preferably with environment
+variables such as `ConnectionStrings__Cosmos=...`; see the `host-services` skill.
 
 ## Login persistence and config from your host
 
@@ -225,9 +268,19 @@ Baked into the image, on top of a pinned version of Claude Code itself:
   `HADOLINT_VERSION` in the Dockerfile.
 - **The Aspire CLI** (`aspire`, pinned via `ASPIRE_CLI_VERSION` in the
   Dockerfile) on the `PATH` of every process, so Claude Code can start the
-  Aspire MCP server (`aspire agent mcp`) from a project's `.mcp.json`.
-  `DOTNET_CLI_HOME` points at a writable `/home/node/dn`. `aspire agent init`
-  is not run at build time; it writes project files.
+  Aspire MCP server (`aspire agent mcp`). `entrypoint.sh` registers it as a
+  user-scope MCP server named `aspire` in `~/.claude.json` on every start, so
+  agents can talk to Aspire dashboards running in the container without a
+  project `.mcp.json`. `DOTNET_CLI_HOME` points at a writable `/home/node/dn`.
+  `aspire agent init` is not run; it writes project files.
+- **`procps`** — `ps`, `pgrep` and `pkill`, for stopping background processes
+  such as test servers.
+- **`host-services` skill** (from `skills/host-services`, baked into
+  `/opt/skills` and copied to `~/.claude/skills` on start unless your host
+  already has one of that name) — tells the agent to reach services on your
+  machine, such as the Cosmos DB and Azurite emulators, as
+  `host.docker.internal` rather than `localhost`, and how to probe a host port.
+  Your containers must publish their ports.
 - **A writable npm global prefix** — `npm install -g` works at runtime as
   the `node` user, not just during the image build.
 

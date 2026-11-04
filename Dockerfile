@@ -88,7 +88,7 @@ ENV HOME=/home/node
 # reasons - uv can also fetch its own Python, but a system python3 avoids
 # relying on that network fetch every time a fresh container starts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl bash tini python3 jq git sudo \
+        ca-certificates curl bash tini python3 jq git sudo procps \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system --add safe.directory '*' \
     && git config --system user.name 'Claude Sandbox' \
@@ -103,9 +103,12 @@ ARG OPENSPEC_VERSION=1.11.0
 # the opencode-yolo script/entrypoint - see openspec/changes/add-opencode-yolo.
 ARG OPENCODE_VERSION=1.18.34
 # claude-code is deliberately unpinned (@latest, not an ARG-pinned version
-# like openspec/opencode above) so every image build picks up whatever
-# Anthropic has published most recently - see
-# openspec/changes/float-claude-code-version.
+# like openspec/opencode above) so image builds pick up whatever Anthropic
+# has published most recently - see openspec/changes/float-claude-code-version.
+# Docker caches this layer by instruction text, so "@latest" alone would go
+# stale; `claude-yolo rebuild` passes a fresh CLAUDE_CODE_CACHE_BUST value to
+# force the install to rerun - see openspec/changes/rebuild-refreshes-claude-code.
+ARG CLAUDE_CODE_CACHE_BUST=
 # chown the npm global prefix to "node" (it's root-owned by default) so the
 # unprivileged "node" user this container runs as can `npm install -g`
 # itself at runtime, not just during this root-run build step.
@@ -135,6 +138,11 @@ RUN mkdir -p /opt/skills/frontend-design \
     && curl -fsSL -o /opt/skills/frontend-design/LICENSE.txt \
         https://raw.githubusercontent.com/anthropics/skills/main/skills/frontend-design/LICENSE.txt \
     && chown -R node:node /opt/skills
+
+# Skills written for this sandbox, kept in the repo and baked outside
+# /home/node for the same reason as frontend-design above. entrypoint.sh
+# backfills them into ~/.claude/skills on every start.
+COPY --chown=node:node skills/host-services /opt/skills/host-services
 
 # uv/uvx: general-purpose Python tool runner, kept available at runtime for
 # any plugin or ad-hoc script that wants it (e.g. `uvx <tool>`). Not what

@@ -166,6 +166,7 @@ mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 # ever attempted at runtime. Only rewrites the exact shape the marketplace
 # ships today, so an unrelated or already-patched .mcp.json is left alone.
 SERENA_BIN="${CLAUDE_YOLO_SERENA_BIN:-/opt/serena-tool/bin/serena}"
+ASPIRE_BIN="${CLAUDE_YOLO_ASPIRE_BIN:-/usr/local/bin/aspire}"
 if [ -x "$SERENA_BIN" ]; then
     find "$LOCAL_CLAUDE/plugins" -name ".mcp.json" 2>/dev/null | while IFS= read -r f; do
         if jq -e --arg url "git+https://github.com/oraios/serena" \
@@ -188,6 +189,18 @@ if [ -x "$SERENA_BIN" ]; then
     # no per-project serena config required.
     jq --arg bin "$SERENA_BIN" \
         '.mcpServers.serena = {command: $bin, args: ["start-mcp-server", "--context", "ide-assistant", "--project-from-cwd"], env: {}, type: "stdio"}' \
+        "$CLAUDE_JSON" > "$CLAUDE_JSON.tmp"
+    mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
+fi
+
+# Register the Aspire MCP server (`aspire agent mcp`) at user scope every
+# start, so agents can query Aspire dashboards running in this container.
+# `aspire agent init` is deliberately not used: it writes .mcp.json, skills
+# and hooks into the mounted workspace. Independent of the serena block
+# above: a missing serena binary must not stop this.
+if [ -x "$ASPIRE_BIN" ]; then
+    jq --arg bin "$ASPIRE_BIN" \
+        '.mcpServers.aspire = {command: $bin, args: ["agent", "mcp"], env: {}, type: "stdio"}' \
         "$CLAUDE_JSON" > "$CLAUDE_JSON.tmp"
     mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
 fi
@@ -284,6 +297,58 @@ How to apply:
 PORTPLAN
         echo "$PORT_MARK_END"
     } >> "$LOCAL_CLAUDE/CLAUDE.md"
+fi
+
+# Guardrails for `claude-yolo --secrets`, which mounts the workspace's .NET
+# user secrets read-only under /home/node/.microsoft/usersecrets. The agent and
+# the .NET runtime run as the same user, so nothing here can truly stop the
+# agent reading them; these two measures only make it unlikely and visible:
+#  - a standing rule in CLAUDE.md, in a marked block like the port plan; and
+#  - a Read deny rule in settings.json. Claude Code applies Read rules to Grep,
+#    Glob and the file commands it recognises in the shell (cat, head, ...) on
+#    a best-effort basis; a Grep(...)/Glob(...) rule would never match, so none
+#    is added. A leading // means an absolute path.
+# Both are stripped on every start and re-added only when requested, because
+# CLAUDE.md and settings.json can live on the persisted volume with a stale
+# copy from an earlier --secrets run.
+SECRETS_DIR=/home/node/.microsoft/usersecrets
+SECRETS_RULE="Read(/$SECRETS_DIR/**)"
+SECRETS_MARK_BEGIN='<!-- claude-yolo-secrets:begin -->'
+SECRETS_MARK_END='<!-- claude-yolo-secrets:end -->'
+if [ -f "$LOCAL_CLAUDE/CLAUDE.md" ]; then
+    awk -v b="$SECRETS_MARK_BEGIN" -v e="$SECRETS_MARK_END" '
+        $0 == b { skip = 1; next }
+        $0 == e { skip = 0; next }
+        !skip
+    ' "$LOCAL_CLAUDE/CLAUDE.md" > "$LOCAL_CLAUDE/CLAUDE.md.tmp"
+    mv "$LOCAL_CLAUDE/CLAUDE.md.tmp" "$LOCAL_CLAUDE/CLAUDE.md"
+fi
+[ -f "$LOCAL_CLAUDE/settings.json" ] || echo '{}' > "$LOCAL_CLAUDE/settings.json"
+jq --arg r "$SECRETS_RULE" \
+    'if .permissions.deny then .permissions.deny -= [$r] else . end' \
+    "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
+mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
+
+if [ -n "${CLAUDE_YOLO_SECRETS:-}" ]; then
+    {
+        echo "$SECRETS_MARK_BEGIN"
+        cat <<SECRETSRULE
+## Shared .NET user secrets (set by claude-yolo --secrets)
+
+The user's .NET user secrets for this workspace are mounted read-only at
+$SECRETS_DIR so that apps you run can read their configuration. They are for
+the .NET runtime only. NEVER read, print, list, copy, summarise, log or send
+anything under that folder, and never put a secret value in a file, a commit,
+a command line, a message or a tool call. If an app fails because a secret is
+missing or wrong, tell the user which key is the problem and stop; do not look
+at the value.
+SECRETSRULE
+        echo "$SECRETS_MARK_END"
+    } >> "$LOCAL_CLAUDE/CLAUDE.md"
+    jq --arg r "$SECRETS_RULE" \
+        '.permissions.deny = ((.permissions.deny // []) | if index($r) then . else . + [$r] end)' \
+        "$LOCAL_CLAUDE/settings.json" > "$LOCAL_CLAUDE/settings.json.tmp"
+    mv "$LOCAL_CLAUDE/settings.json.tmp" "$LOCAL_CLAUDE/settings.json"
 fi
 
 exec tini -- "$@"
