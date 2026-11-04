@@ -2,3 +2,4 @@
 !entrypoint.sh
 !git-wrapper.sh
 !opencode-entrypoint.sh
+!statusline-command.sh
