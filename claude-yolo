@@ -14,7 +14,7 @@ set -eu
 
 print_help() {
     cat <<'EOF'
-Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [subcommand] [-- <args for claude>]
+Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [subcommand] [-- <args for claude>]
 
   --help, -h           Show this help and exit. Short-circuits everything
                        else: no Docker interaction, no workspace validation.
@@ -27,6 +27,14 @@ Usage: claude-yolo [--help] [<workspace-path> | --workspace <path>] [subcommand]
                        named exactly "run", "yolo", "rebuild", or "nuke"
                        needs an explicit form (e.g. ./run) since those
                        four words are always read as subcommands first.
+
+  --ports <base>       Publish 20 ports, <base> through <base>+19, on the
+                       host's loopback (127.0.0.1 only), mapped to the same
+                       numbers inside the container, so a test app, Aspire
+                       dashboard etc. is reachable at http://localhost:<port>.
+                       Claude is told to keep its apps within that range.
+                       Must come before the subcommand. Without it nothing
+                       is published. Valid base: 1024-65516.
 
 Subcommands:
   (none)               Same as "yolo".
@@ -53,6 +61,7 @@ Examples:
   claude-yolo
   claude-yolo run -- "review this file"
   claude-yolo ../other-project run
+  claude-yolo --ports 5100
   claude-yolo ../other-project -- --model opus -p "one-shot query"
   claude-yolo rebuild
 EOF
@@ -110,7 +119,7 @@ elif [ "$#" -ge 1 ]; then
     # "yolo"/"rebuild"/"nuke") needs an explicit form like `./run` to be
     # used as a workspace path.
     case "$1" in
-        rebuild|nuke|run|yolo|--)
+        rebuild|nuke|run|yolo|--|--ports)
             ;;
         -*)
             echo "claude-yolo: unknown option '$1' (see claude-yolo --help)" >&2
@@ -125,6 +134,30 @@ elif [ "$#" -ge 1 ]; then
             shift
             ;;
     esac
+fi
+
+# --ports <base> publishes <base>..<base>+19 (see print_help). Goes after any
+# workspace path/--workspace and before the subcommand, for the same
+# ambiguity reason as --workspace above.
+PORT_BASE=""
+PORT_COUNT=20
+if [ "${1:-}" = "--ports" ]; then
+    if [ "$#" -lt 2 ]; then
+        echo "claude-yolo: --ports requires a base port argument" >&2
+        exit 1
+    fi
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "claude-yolo: --ports base '$2' is not a number" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$2" -lt 1024 ] || [ "$2" -gt $((65535 - PORT_COUNT + 1)) ]; then
+        echo "claude-yolo: --ports base must be between 1024 and $((65535 - PORT_COUNT + 1))" >&2
+        exit 1
+    fi
+    PORT_BASE="$2"
+    shift 2
 fi
 
 # Mounted read-only at run time (not baked into the image) so edits to your
@@ -164,6 +197,9 @@ run_container() {
         -v "$VOLUME":/home/node \
         ${CLAUDE_CONFIG_MOUNT:+"$CLAUDE_CONFIG_MOUNT"} \
         ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY} \
+        ${PORT_BASE:+-p "127.0.0.1:$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1)):$PORT_BASE-$((PORT_BASE + PORT_COUNT - 1))"} \
+        ${PORT_BASE:+-e "CLAUDE_YOLO_BASE_PORT=$PORT_BASE"} \
+        ${PORT_BASE:+-e "CLAUDE_YOLO_PORT_COUNT=$PORT_COUNT"} \
         "$IMAGE" "$@"
 }
 

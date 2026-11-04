@@ -164,6 +164,32 @@ expect_exit_code 1 "no-args default without -- fails"
 expect_stderr_contains "--" "no-args-default error mentions the -- separator"
 expect_log_empty "no-args-default missing -- makes no docker calls"
 
+# --- --ports ---
+
+run_cli "$WORK" --ports 5100 run -- hi
+expect_exit_code 0 "--ports 5100 exits 0"
+expect_log_contains "-p 127.0.0.1:5100-5119:5100-5119" "--ports publishes 20 loopback ports, same numbers both sides"
+expect_log_contains "CLAUDE_YOLO_BASE_PORT=5100" "--ports passes base port into the container"
+expect_log_contains "CLAUDE_YOLO_PORT_COUNT=20" "--ports passes port count into the container"
+
+run_cli "$WORK" "$OTHER_PROJECT" --ports 6000 run
+expect_exit_code 0 "workspace path then --ports exits 0"
+expect_log_contains "-v $OTHER_PROJECT:/workspace" "workspace path still honoured with --ports"
+expect_log_contains "127.0.0.1:6000-6019:6000-6019" "--ports after workspace path publishes range"
+
+run_cli "$WORK" run
+if grep -qF -- " -p " "$LOG"; then fail "no --ports publishes nothing (got: $(cat "$LOG"))"; else pass; fi
+
+run_cli "$WORK" --ports
+expect_exit_code 1 "--ports without value fails"
+run_cli "$WORK" --ports abc run
+expect_exit_code 1 "--ports non-numeric fails"
+run_cli "$WORK" --ports 80 run
+expect_exit_code 1 "--ports below 1024 fails"
+run_cli "$WORK" --ports 65530 run
+expect_exit_code 1 "--ports range overflowing 65535 fails"
+expect_log_empty "invalid --ports makes no docker calls"
+
 echo ""
 echo "Passed: $PASS_COUNT, Failed: $FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

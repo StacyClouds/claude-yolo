@@ -215,4 +215,75 @@ backfill "$BAKED_SKILLS" "$LOCAL_CLAUDE/skills"
 backfill "$OPENSPEC_BAKED/.claude/skills" "$LOCAL_CLAUDE/skills"
 backfill "$OPENSPEC_BAKED/.claude/commands" "$LOCAL_CLAUDE/commands"
 
+# Port plan for `claude-yolo --ports <base>`. The claude-yolo script publishes
+# <base>..<base>+COUNT-1 on the host's loopback, mapped to the same numbers
+# here, and passes the range in via CLAUDE_YOLO_BASE_PORT/_PORT_COUNT. Tell
+# Claude (through a marked block appended to the user-level CLAUDE.md) which
+# port each kind of endpoint belongs on, so apps it starts are reachable from
+# outside. Env vars alone can't do this: launchSettings.json overrides
+# ASPNETCORE_URLS, and Aspire proxies services on random ports unless the
+# AppHost pins them - hence instructions as well as the Aspire env vars below.
+#
+# The block is stripped on every start first (CLAUDE.md may live on the
+# persisted volume with a stale block, e.g. from an earlier --ports run when
+# the host provides no CLAUDE.md to overwrite it), then re-added only if
+# ports were requested.
+PORT_MARK_BEGIN='<!-- claude-yolo-ports:begin -->'
+PORT_MARK_END='<!-- claude-yolo-ports:end -->'
+mkdir -p "$LOCAL_CLAUDE"
+if [ -f "$LOCAL_CLAUDE/CLAUDE.md" ]; then
+    awk -v b="$PORT_MARK_BEGIN" -v e="$PORT_MARK_END" '
+        $0 == b { skip = 1; next }
+        $0 == e { skip = 0; next }
+        !skip
+    ' "$LOCAL_CLAUDE/CLAUDE.md" > "$LOCAL_CLAUDE/CLAUDE.md.tmp"
+    mv "$LOCAL_CLAUDE/CLAUDE.md.tmp" "$LOCAL_CLAUDE/CLAUDE.md"
+fi
+
+if [ -n "${CLAUDE_YOLO_BASE_PORT:-}" ]; then
+    PB="$CLAUDE_YOLO_BASE_PORT"
+    PE=$((PB + ${CLAUDE_YOLO_PORT_COUNT:-20} - 1))
+
+    # Aspire: plain HTTP on the dashboard is refused unless opted into, and
+    # its OTLP/resource-service endpoints default to random ports.
+    export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true
+    export ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL="http://localhost:$((PB + 3))"
+    export ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL="http://localhost:$((PB + 4))"
+
+    {
+        echo "$PORT_MARK_BEGIN"
+        cat <<PORTPLAN
+## Network ports (set by claude-yolo --ports)
+
+This container publishes TCP ports $PB-$PE to the user's machine at
+http://localhost:<port> (same port number on both sides). Anything the user
+should be able to open in a browser or call from outside MUST listen on one of
+these ports, bound to 0.0.0.0 (not localhost/127.0.0.1, which the port mapping
+cannot reach). Do not use ports outside this range for anything user-facing.
+Use plain HTTP, not HTTPS.
+
+Allocation:
+- $PB: main web app / public API
+- $((PB + 1)): second web app or API
+- $((PB + 2)): Aspire dashboard
+- $((PB + 3)): Aspire dashboard OTLP endpoint (env already set)
+- $((PB + 4)): Aspire resource service (env already set)
+- $((PB + 5))-$PE: any further services, in order
+
+How to apply:
+- Plain ASP.NET Core app: dotnet run --no-launch-profile --urls http://0.0.0.0:$PB
+  (launchSettings.json otherwise overrides the URL).
+- Aspire AppHost: ASPNETCORE_URLS=http://0.0.0.0:$((PB + 2)) dotnet run --no-launch-profile
+  (ASPIRE_ALLOW_UNSECURED_TRANSPORT is already set). Aspire assigns services
+  random proxy ports by default, so pin every externally-visible service in the
+  AppHost, e.g. .WithHttpEndpoint(port: $PB, targetPort: <port the service
+  listens on>) or equivalent, using the ports above.
+- Blazor, Minimal API, Playwright targets etc.: the same rule, one port each.
+- After starting something, tell the user the exact URL, e.g. http://localhost:$PB.
+- If you need more ports than $((PE - PB + 1)), say so rather than using others.
+PORTPLAN
+        echo "$PORT_MARK_END"
+    } >> "$LOCAL_CLAUDE/CLAUDE.md"
+fi
+
 exec tini -- "$@"

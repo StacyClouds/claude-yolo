@@ -176,5 +176,31 @@ if run_entrypoint; then
     fi
 fi
 
+# --- --ports: port plan in CLAUDE.md ---
+run_entrypoint_ports() {
+    CLAUDE_YOLO_BASE_PORT="$1" CLAUDE_YOLO_PORT_COUNT=20 run_entrypoint
+}
+
+CURRENT="ports requested"
+new_sandbox ports
+echo '# host rules' > "$HOST/CLAUDE.md"
+if run_entrypoint_ports 5100; then
+    if grep -qF "5100-5119" "$LOCAL/CLAUDE.md" && grep -qF "# host rules" "$LOCAL/CLAUDE.md" \
+        && grep -qF "http://0.0.0.0:5102" "$LOCAL/CLAUDE.md"; then pass; else fail "$CURRENT: port plan appended after host CLAUDE.md"; fi
+fi
+
+CURRENT="ports rerun does not duplicate"
+if run_entrypoint_ports 5100; then
+    n="$(grep -c 'claude-yolo-ports:begin' "$LOCAL/CLAUDE.md")"
+    if [ "$n" = 1 ]; then pass; else fail "$CURRENT: expected 1 block, got $n"; fi
+fi
+
+CURRENT="ports not requested strips stale block"
+new_sandbox noports
+printf '# mine\n<!-- claude-yolo-ports:begin -->\nstale\n<!-- claude-yolo-ports:end -->\n' > "$LOCAL/CLAUDE.md"
+if run_entrypoint; then
+    expect_file_content "$LOCAL/CLAUDE.md" '# mine' "stale port block removed, rest kept"
+fi
+
 echo "$PASS_COUNT passed, $FAIL_COUNT failed"
 [ "$FAIL_COUNT" -eq 0 ]

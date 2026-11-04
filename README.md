@@ -50,7 +50,7 @@ of where it's called from.
 ## Usage
 
 ```
-claude-yolo [--help] [<workspace-path> | --workspace <path>] [subcommand] [-- <args for claude>]
+claude-yolo [--help] [<workspace-path> | --workspace <path>] [--ports <base>] [subcommand] [-- <args for claude>]
 ```
 
 Run `claude-yolo --help` for the full usage at any time.
@@ -93,6 +93,30 @@ No rebuild is needed — this is just a different `docker run -v` argument
 each time. You can run multiple `claude-yolo` invocations concurrently
 against different workspace paths; each gets its own container and
 `/workspace`, while all of them share the same persisted login (see below).
+
+### Reaching a test app from outside (`--ports`)
+
+Nothing is published by default. To run a web app, API or Aspire dashboard
+inside the sandbox and open it from your browser:
+
+```sh
+claude-yolo --ports 5100          # 5100-5119 -> http://localhost:<port>
+claude-yolo ~/code/proj --ports 5100 yolo
+```
+
+This publishes 20 ports, `<base>` to `<base>+19`, bound to the host's
+`127.0.0.1` only (not your LAN), mapped to the same numbers inside the
+container, so URLs printed in the container work unchanged on your host. Use a
+different base per concurrent instance (`5100`, `5200`, ...). Base must be
+1024-65516; it must come after any workspace path and before the subcommand.
+
+Inside the container, `entrypoint.sh` sets the Aspire env vars
+(`ASPIRE_ALLOW_UNSECURED_TRANSPORT`, OTLP and resource-service endpoints) and
+appends a port plan to Claude's `CLAUDE.md` telling it which port each kind of
+endpoint belongs on (`<base>` main app, `+1` second app, `+2` Aspire dashboard,
+`+3`/`+4` Aspire OTLP/resource service, `+5`.. others) and to bind `0.0.0.0` over
+plain HTTP. The port mapping is enforced by Docker; *which port an app uses* is
+Claude following those instructions, not something the container can force.
 
 ## Login persistence and config from your host
 
